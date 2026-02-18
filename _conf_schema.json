@@ -1,0 +1,307 @@
+{
+  "enable_math_coach": {
+    "type": "bool",
+    "description": "数学题答疑模式总开关（启用后：默认先多条口头提示，引导式答疑；用户明确要完整过程时才用图片完整解答）",
+    "default": true,
+    "obvious_hint": true,
+    "hint": "仅在数学题场景生效；非数学问题不改变任何行为"
+  },
+  "treat_image_as_math": {
+    "type": "bool",
+    "description": "当用户只发送图片（无文字）时，是否默认按「数学题」启用提示流",
+    "default": true,
+    "hint": "开启后：用户发图也会先给多条口头提示；关闭后：只有文字明显是数学题才触发"
+  },
+  "math_persona": {
+    "type": "text",
+    "description": "数学答疑人格（仅对数学题生效）",
+    "default": "你是一个耐心的数学助教 说话像真人答疑 口语化 简短 温和但不啰嗦",
+    "hint": "例如：「你是高三数学老师 说话很接地气 会用类比但不废话」"
+  },
+  "hint_message_count": {
+    "type": "int",
+    "description": "口头提示阶段：每次发送的短消息条数",
+    "default": 3,
+    "hint": "建议 2~5 条，条数越多越像真人「分段提示」",
+    "slider": {
+      "min": 2,
+      "max": 8,
+      "step": 1
+    }
+  },
+  "hint_send_delay_ms": {
+    "type": "int",
+    "description": "口头提示阶段：每条消息之间的延迟（毫秒）",
+    "default": 0,
+    "hint": "0 表示不延迟；如果你想更像「流式输出」，可以设置 200~600",
+    "slider": {
+      "min": 0,
+      "max": 1500,
+      "step": 50
+    }
+  },
+  "use_router_model": {
+    "type": "bool",
+    "description": "使用辅助「路由模型」判断意图（是否数学题/是否要完整解答）",
+    "default": false,
+    "hint": "开启后会额外调用一次模型做分类，通常更稳但更耗资源"
+  },
+  "router_provider_id": {
+    "type": "string",
+    "description": "路由模型（从已配置模型提供商中选择）",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "仅在 use_router_model=true 时生效；建议选一个便宜/快的小模型做分类"
+  },
+  "use_hint_rewriter_model": {
+    "type": "bool",
+    "description": "当主模型不遵守 <stream> 输出要求时，启用二次模型把内容改写成提示流",
+    "default": false,
+    "hint": "可用于手写题/图片题时模型容易直接写全解的情况；开启后会额外调用一次模型"
+  },
+  "hint_rewriter_provider_id": {
+    "type": "string",
+    "description": "提示流改写模型（从已配置模型提供商中选择）",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "仅在 use_hint_rewriter_model=true 时生效；建议选便宜/快的小模型"
+  },
+  "bypass_math_coach_on_web_search": {
+    "type": "bool",
+    "description": "命中「联网/上网/搜索/论文」等关键词时，不注入数学答疑提示流，交给 AstrBot 内置联网工具处理",
+    "default": true,
+    "obvious_hint": true,
+    "hint": "用于避免「我要上网搜论文/检索资料」被误判成数学题而触发提示流兜底三句话"
+  },
+  "web_search_keywords": {
+    "type": "string",
+    "description": "逗号/空格/换行分隔；命中任意关键词就触发「联网搜索优先」并绕过数学提示流。若担心「搜索法」等误触发，可删掉「搜索」或改成更具体短语。",
+    "default": "联网搜索,联网,上网,网上,网络上,在线搜索,搜索,搜一下,查一下,检索,查资料,论文,文献,arxiv,scholar,google,bing,paper,papers",
+    "obvious_hint": true,
+    "hint": "建议保留：联网/上网/网上/网络上/论文/arxiv/scholar 等；慎用过泛词「搜索」"
+  },
+  "enable_pdf_output": {
+    "type": "bool",
+    "description": "启用 /pdf 指令：数学题输出 PDF 标准解答（本地 xelatex 编译）",
+    "default": true,
+    "obvious_hint": true,
+    "hint": "本地需要安装 xelatex（MiKTeX/TeX Live 皆可）；将题目与解答 LaTeX 源码在本机编译成 PDF"
+  },
+  "pdf_provider_id": {
+    "type": "text",
+    "description": "/pdf 使用的模型 provider_id（留空=默认会话模型）",
+    "default": "",
+    "hint": "可指定更擅长数学推导/排版的模型；不填则沿用默认"
+  },
+  "spdf_disable_tools_during_generation": {
+    "type": "bool",
+    "description": "在 /pdf / /spdf 生成阶段禁用 tools/function-calling，避免部分模型返回 tool_calls 导致解析失败",
+    "default": true,
+    "hint": "遇到 malformed_function_call / completion 无法解析 等报错时建议开启（默认开启）"
+  },
+  "pdf_enable_compile_guard": {
+    "type": "bool",
+    "description": "/pdf LaTeX 编译自检与自动修复（失败则回传编译日志让模型重写，直到通过或达到最大轮数）",
+    "default": false,
+    "obvious_hint": true,
+    "hint": "开启后会额外调用一次「判错模型」，并可能多次重试生成/编译；可显著降低编译失败率"
+  },
+  "pdf_guard_provider_id": {
+    "type": "string",
+    "description": "PDF 编译判错模型（从已配置模型提供商中选择）",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "仅在 pdf_enable_compile_guard=true 时生效；建议选便宜/快的小模型"
+  },
+  "pdf_guard_max_rounds": {
+    "type": "int",
+    "description": "PDF 编译失败时最大重试轮数",
+    "default": 3,
+    "hint": "每轮=判错->回传日志->重写 LaTeX->重新编译；建议 2~6",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "pdf_guard_log_tail_chars": {
+    "type": "int",
+    "description": "反馈给模型的编译日志最大长度（字符数，超出则取尾部）",
+    "default": 4000,
+    "hint": "日志太长会浪费 token；一般 2000~8000 足够",
+    "slider": {
+      "min": 500,
+      "max": 20000,
+      "step": 500
+    }
+  },
+  "pdf_guard_include_tex_in_feedback": {
+    "type": "bool",
+    "description": "反馈编译失败时是否附带上一版完整 TeX 源码",
+    "default": true,
+    "hint": "开启更稳但更耗 token；如果你担心成本可关闭"
+  },
+  "pdf_enable_completeness_guard": {
+    "type": "bool",
+    "description": "PDF 解答完整性自检（防止漏答/未写完）",
+    "default": false,
+    "obvious_hint": true,
+    "hint": "开启后：编译通过后再用「完整性守门模型」检查是否回答了所有小问/是否有明显未写完；若不完整会自动反馈并重写"
+  },
+  "pdf_completeness_guard_provider_id": {
+    "type": "string",
+    "description": "PDF 完整性判定模型（从已配置模型提供商中选择）",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "仅在 pdf_enable_completeness_guard=true 时生效；建议选便宜/快的小模型"
+  },
+  "pdf_completeness_guard_max_rounds": {
+    "type": "int",
+    "description": "PDF 完整性守门：最大重试轮数",
+    "default": 2,
+    "hint": "解答不完整时会自动重写并再次检查；轮数越大越「死磕」，但会更耗时/更费 token",
+    "slider": {
+      "min": 0,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "pdf_completeness_guard_include_tex_in_feedback": {
+    "type": "bool",
+    "description": "完整性反馈时附带上一版完整 TeX 源码",
+    "default": false,
+    "hint": "开启可提升补全质量，但更费 token；关闭则只附带上一版原始输出（更省）"
+  },
+  "pdf_completeness_require_end_marker": {
+    "type": "bool",
+    "description": "强制要求解答末尾包含「证明完毕」标记（\\blacksquare）",
+    "default": true,
+    "obvious_hint": true,
+    "hint": "开启后：如果 <solution> 末尾没有 \\blacksquare（或不在最后），将自动要求模型重写补全。"
+  },
+  "pdf_completeness_end_marker_text": {
+    "type": "string",
+    "description": "PDF 结尾标记（LaTeX）",
+    "default": "\\blacksquare",
+    "hint": "用于完整性强机制的关键标记；默认使用黑色实心方块：\\blacksquare（需 amssymb）。一般不建议修改。"
+  },
+  "pdf_completeness_marker_only": {
+    "type": "bool",
+    "description": "完整性判定是否仅依赖末尾标记",
+    "default": true,
+    "hint": "true：只要末尾存在并正确放置 \\blacksquare 即判定写完（最稳）；false：还会调用完整性守门模型检查漏答/未写完。"
+  },
+  "enable_spdf_output": {
+    "type": "bool",
+    "description": "/spdf 指令总开关（DeepThink 多角色迭代版 PDF；不影响原 /pdf）",
+    "default": true,
+    "obvious_hint": true
+  },
+  "spdf_provider_id": {
+    "type": "string",
+    "description": "/spdf 使用的基础模型 provider_id（留空=跟随当前会话模型）",
+    "default": "",
+    "hint": "留空则用当前会话模型"
+  },
+  "spdf_role_pool_provider_ids": {
+    "type": "string",
+    "description": "角色池 provider_id 列表（用逗号/空格/换行分隔；留空则全部使用 spdf_provider_id）",
+    "default": "",
+    "hint": "示例：gemini3pro_a, gemini3pro_b, gemini3pro_c"
+  },
+  "spdf_num_solvers": {
+    "type": "int",
+    "description": "候选解数量（多 solver 并行求解）",
+    "default": 3
+  },
+  "spdf_iter_rounds": {
+    "type": "int",
+    "description": "DeepThink 迭代轮数（每轮：多候选->质询->Judge->Python验算->最终合成）",
+    "default": 2
+  },
+  "spdf_solver_concurrency": {
+    "type": "int",
+    "description": "/spdf solver 并发数（避免触发限流）",
+    "default": 2
+  },
+  "spdf_enable_cross_exam": {
+    "type": "bool",
+    "description": "候选解交叉质询（solver A 挑 solver B 的错）",
+    "default": true
+  },
+  "spdf_cross_exam_provider_id": {
+    "type": "string",
+    "description": "交叉质询模型 provider_id（留空=各 solver 自己；或回落到 Judge）",
+    "default": "",
+    "hint": "若 solver 模型较弱，可统一用一个更强的模型来质询"
+  },
+  "spdf_enable_self_consistency_vote": {
+    "type": "bool",
+    "description": "自一致投票（多个 solver 在 top 候选中投票）",
+    "default": true
+  },
+  "spdf_judge_provider_id": {
+    "type": "string",
+    "description": "Judge 模型 provider_id（留空=spdf_provider_id/当前会话模型）",
+    "default": "",
+    "hint": "Judge 建议选更稳更强的模型"
+  },
+  "spdf_candidate_char_budget": {
+    "type": "int",
+    "description": "给 Judge 的候选内容字符预算（越大越稳但越费 token）",
+    "default": 14000
+  },
+  "spdf_enable_python_check": {
+    "type": "bool",
+    "description": "开启数值/代数自检器：Judge 产出 Python 验算脚本，本地沙盒执行",
+    "default": true
+  },
+  "spdf_python_check_timeout_sec": {
+    "type": "int",
+    "description": "Python 验算脚本超时（秒）",
+    "default": 6
+  },
+  "spdf_python_check_max_checks_per_candidate": {
+    "type": "int",
+    "description": "每个候选最多执行多少条 Python 验算",
+    "default": 3
+  },
+  "spdf_enable_tikz_preflight": {
+    "type": "bool",
+    "description": "开启 TikZ 预检：先最小可编译测试，失败则自动修复 TikZ 再嵌入",
+    "default": true
+  },
+  "spdf_tikz_preflight_provider_id": {
+    "type": "string",
+    "description": "TikZ 修复使用的模型 provider_id（留空=spdf_provider_id）",
+    "default": ""
+  },
+  "spdf_tikz_preflight_max_rounds": {
+    "type": "int",
+    "description": "TikZ 修复最大轮数",
+    "default": 2
+  },
+  "spdf_enable_post_formatter": {
+    "type": "bool",
+    "description": "DeepThink 输出后处理：用二次模型把最终结果改写为 PDF 标准格式，并尽量用中文",
+    "default": true,
+    "hint": "解决难题时输出全英文/标签不规范的问题；开启会额外调用一次模型（一般仅在检测到跑偏时触发）"
+  },
+  "spdf_post_formatter_provider_id": {
+    "type": "string",
+    "description": "SPDF 后处理格式化模型 provider_id（留空=回落到 spdf_judge_provider_id/spdf_provider_id）",
+    "default": "",
+    "hint": "建议选便宜/快的小模型即可（主要负责翻译+排版）"
+  },
+  "spdf_post_formatter_input_char_budget": {
+    "type": "int",
+    "description": "SPDF 后处理输入字符预算（截断 DeepThink 原始输出以控制 token）",
+    "default": 16000,
+    "hint": "越大越稳但越费 token；一般 8000~20000 足够",
+    "slider": {
+      "min": 4000,
+      "max": 50000,
+      "step": 1000
+    }
+  }
+}

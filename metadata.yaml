@@ -1,0 +1,5 @@
+name: astrbot_plugin_mathsolve # 这是你的插件的唯一识别名。
+desc: Markdown 转图片渲染 + 数学答疑提示流 + /pdf LaTeX 解答 + /spdf DeepThink 多角色迭代 + 支持知识库检索转图片 # 插件简短描述
+version: v1.11.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+author: blueraina # 作者
+repo: https://github.com/blueraina/astrbot_plugin_mathsolve # 插件的仓库地址
