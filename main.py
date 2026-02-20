@@ -2961,17 +2961,18 @@ class MarkdownConverterPlugin(Star):
             return
 
         # === 随机等待提示语 Start ===
+        sender_name = (event.get_sender_name() or "我").strip() or "我"
         pdf_loading_msgs = [
-            "Eila 正在疯狂敲击键盘生成 PDF 中！请稍等，马上就送达你的手中！",
-            "Eila 正在施展 PDF 生成魔法，只需再坚持几秒钟，奇迹即将发生！",
-            "Eila 抱着刚生成的 PDF 一路狂奔，这就送到你面前，请稍安勿躁！️",
-            "Eila 的 PDF 工厂正在全速开工，齿轮飞转中！请稍候，成品即将上线！",
-            "Eila 正在把散落的字节拼凑成完美的 PDF，精彩内容马上呈现！",
-            "正在给文件加热中... Eila 保证这份 PDF 会热乎乎、香喷喷地出炉！",
-            "正在给 PDF 做最后的美容护理，Eila 务必要让它漂漂亮亮地见你！",
-            "Eila 的 CPU 正在高速运转，为了这份 PDF 已经全力以赴啦！马上搞定！",
-            "Eila 正在数据海洋里潜水，只为把这份珍贵的 PDF 捞上来给你！马上浮出水面！",
-            "嘘——Eila 正在全神贯注地封装数据，这份 PDF 凝聚了她所有的心血，马上就好！"
+            f"{sender_name} 正在疯狂敲击键盘生成 PDF 中！请稍等，马上就送达你的手中！",
+            f"{sender_name} 正在施展 PDF 生成魔法，只需再坚持几秒钟，奇迹即将发生！",
+            f"{sender_name} 抱着刚生成的 PDF 一路狂奔，这就送到你面前，请稍安勿躁！️",
+            f"{sender_name} 的 PDF 工厂正在全速开工，齿轮飞转中！请稍候，成品即将上线！",
+            f"{sender_name} 正在把散落的字节拼凑成完美的 PDF，精彩内容马上呈现！",
+            f"正在给文件加热中... {sender_name} 保证这份 PDF 会热乎乎、香喷喷地出炉！",
+            f"正在给 PDF 做最后的美容护理，{sender_name} 务必要让它漂漂亮亮地见你！",
+            f"{sender_name} 的 CPU 正在高速运转，为了这份 PDF 已经全力以赴啦！马上搞定！",
+            f"{sender_name} 正在数据海洋里潜水，只为把这份珍贵的 PDF 捞上来给你！马上浮出水面！",
+            f"嘘——{sender_name} 正在全神贯注地封装数据，这份 PDF 凝聚了所有的心血，马上就好！"
         ]
         yield event.plain_result(random.choice(pdf_loading_msgs))
         # === 随机等待提示语 End ===
@@ -3051,7 +3052,8 @@ class MarkdownConverterPlugin(Star):
                 logger.error(f"PDF 生成失败: {err}")
 
             if "Upstream Error" in err:
-                yield event.plain_result("呜哇，Eila 够不到那张图片啦！它好像溜走了（链接过期或拒绝访问）。😣\n能不能麻烦你重新截图再发给我一次?")
+                _sn = (event.get_sender_name() or "我").strip() or "我"
+                yield event.plain_result(f"呜哇，{_sn} 够不到那张图片啦！它好像溜走了（链接过期或拒绝访问）。😣\n能不能麻烦你重新截图再发给我一次?")
             else:
                 # 给用户一个简短的日志末尾，方便快速定位是“缺包/字体”还是“内容里有非法字符”
                 msg = "哎呀，PDF 生成失败了，看起来是排版出了点小差错，重问一次试试吧~"
@@ -3188,7 +3190,8 @@ class MarkdownConverterPlugin(Star):
             yield event.plain_result("请发送 /spdf 题目文字，或发送包含题目的图片 + /spdf")
             return
 
-        yield event.plain_result("捕捉到灵感啦！Eila感到自己突然灵光一闪！正在生成PDF解答，不过等待时间较长哦，请稍候~")
+        _sn = (event.get_sender_name() or "我").strip() or "我"
+        yield event.plain_result(f"捕捉到灵感啦！{_sn}感到自己突然灵光一闪！正在生成PDF解答，不过等待时间较长哦，请稍候~")
 
         reply_id = self._extract_reply_msg_id(event)
         ref_pdf_ctx = ""
@@ -3260,7 +3263,8 @@ class MarkdownConverterPlugin(Star):
 
             # 1) 图片读取失败
             if "Upstream Error" in err:
-                yield event.plain_result("呜呜，Eila 够不到那张图片啦！它好像溜走了（链接过期或拒绝访问）。😣\n能不能麻烦你重新截图再发给我一次？")
+                _sn = (event.get_sender_name() or "我").strip() or "我"
+                yield event.plain_result(f"呜呜，{_sn} 够不到那张图片啦！它好像溜走了（链接过期或拒绝访问）。😣\n能不能麻烦你重新截图再发给我一次？")
                 return
 
             # 2) 鉴权 / Key 缺失
