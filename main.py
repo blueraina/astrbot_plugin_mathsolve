@@ -89,8 +89,8 @@ DEFAULT_CFG: Dict[str, Any] = {
     "enable_math_coach": True,
     # 当用户只发图片（无文字）时是否默认视作“数学题”并启用提示流
     "treat_image_as_math": True,
-    # 提示流条数
-    "hint_message_count": 3,
+
+
     # 提示流每条间隔（ms），增强“流式”感觉
     "hint_send_delay_ms": 0,
     # 数学答疑人格
@@ -1119,36 +1119,33 @@ def _looks_like_markdown_or_full(raw: str) -> bool:
     return False
 
 
-def _normalize_to_n_msgs(lines: List[str], n: int) -> List[str]:
-    n = max(2, min(int(n or 3), 8))
+def _normalize_stream_msgs(lines: List[str]) -> List[str]:
+    """对 AI 自动决定条数的流式消息做基本清理和兜底（不强制固定条数）。"""
     msgs = list(lines or [])
 
+    # 如果只有一条但很长，尝试按句号拆分
     if len(msgs) == 1 and len(msgs[0]) > 60:
         parts = re.split(r"[。！？!?]\s*", msgs[0])
         parts = [p.strip() for p in parts if p.strip()]
         if len(parts) > 1:
             msgs = parts
 
-    if len(msgs) > n:
-        msgs = msgs[:n]
-
-    fallback_pool = [
-        "先把已知和未知量写清楚 再把条件翻译成等式或不等式",
-        "优先从能直接列式的一步开始 例如代入 化简 或把式子移到一边",
-        "如果题里有函数 先看定义域 以及是否能因式分解或配方",
-        "如果你能把题目关键条件打出来 我可以把提示变得更具体",
-        "如果你想要我直接写完整过程 你可以说 直接给完整解答",
-    ]
-    i = 0
-    while len(msgs) < n:
-        msgs.append(fallback_pool[i % len(fallback_pool)])
-        i += 1
+    # 上限兜底：最多 8 条
+    if len(msgs) > 8:
+        msgs = msgs[:8]
 
     msgs = [_strip_trailing_periods(_sanitize_hint_text(m)) for m in msgs]
     msgs = [m for m in msgs if m]
-    while len(msgs) < n:
-        msgs.append("你先写到能得到一个明确的式子 我再带你往下推")
-    return msgs[:n]
+
+    # 下限兜底：如果 AI 没有产出任何有效消息，给通用提示
+    if not msgs:
+        msgs = [
+            "先把已知和未知量写清楚 再把条件翻译成等式或不等式",
+            "如果你能把题目关键条件打出来 我可以把提示变得更具体",
+            "如果你想要我直接写完整过程 你可以说 直接给完整解答",
+        ]
+
+    return msgs
 
 
 # -------------------------------------------------------------------------
@@ -6475,25 +6472,22 @@ class MarkdownConverterPlugin(Star):
             )
 
         persona = str(self._cfg("math_persona", DEFAULT_CFG["math_persona"]) or "").strip()
-        hint_n = int(self._cfg("hint_message_count", 3) or 3)
         req.system_prompt = (req.system_prompt or "") + self._build_math_system_prompt(
             mode=mode,
             persona=persona,
-            hint_n=hint_n,
             has_image=bool(current_images),
             kb_query=kb_query,
             kb_n=kb_n,
         )
 
-    def _build_math_system_prompt(self, mode: str, persona: str, hint_n: int, has_image: bool, kb_query: bool = False,
+    def _build_math_system_prompt(self, mode: str, persona: str, has_image: bool, kb_query: bool = False,
                                   kb_n: int = 2) -> str:
-        hint_n = max(2, min(int(hint_n or 3), 8))
         persona = persona.strip() or DEFAULT_CFG["math_persona"]
         img_hint = "用户发来的是图片题 请先读题 再给提示" if has_image else ""
 
         if mode == "full":
             if kb_query:
-                # 知识库检索/题库挑题：不要输出提示流，直接给“完整回答格式”
+                # 知识库检索/题库挑题：不要输出提示流，直接给"完整回答格式"
                 return (
                     "\n[数学答疑/知识库]\n"
                     f"你的人格设定：{persona}\n"
@@ -6527,7 +6521,8 @@ class MarkdownConverterPlugin(Star):
                   "<stream>\n"
                   "</stream>\n"
                   "规则\n"
-                + f"必须输出恰好{hint_n}条短消息 每条占一行\n"
+                  "根据题目难度和内容 输出2到6条短消息 每条占一行\n"
+                  "简单题少说几句(2-3条) 复杂题可以多引导几步(4-6条) 根据需要自行判断\n"
                   "每条消息只写1-2句话\n"
                   "每条消息句末不要出现句号\n"
                   "不要用 Markdown 不要用 LaTeX 不要用代码块\n"
@@ -6536,16 +6531,15 @@ class MarkdownConverterPlugin(Star):
         )
 
     # ---------- 可选：用二次模型把输出改写成 <stream> ----------
-    async def _rewrite_to_stream(self, raw: str, n: int, has_image: bool) -> Optional[List[str]]:
+    async def _rewrite_to_stream(self, raw: str, has_image: bool) -> Optional[List[str]]:
         if not self._cfg("use_hint_rewriter_model", False):
             return None
         pid = str(self._cfg("hint_rewriter_provider_id", "") or "").strip()
         if not pid:
             return None
-        n = max(2, min(int(n or 3), 8))
         prompt = (
                 "把下面的回答改写成真人答疑式提示流\n"
-                f"必须输出恰好{n}行 每行1-2句话 句末不要加句号\n"
+                "根据内容复杂度输出2到6行 每行1-2句话 句末不要加句号\n"
                 "不要用Markdown 不要用LaTeX 不要给最终答案\n"
                 "只输出 <stream>...</stream> 这一段\n"
                 + ("如果图片题看不清 先让用户补充关键条件\n" if has_image else "")
@@ -6556,7 +6550,7 @@ class MarkdownConverterPlugin(Star):
             llm_resp = await self.context.llm_generate(chat_provider_id=pid, prompt=prompt)
             lines = _extract_stream_lines_only(llm_resp.completion_text or "")
             if lines:
-                return _normalize_to_n_msgs(lines, n)
+                return _normalize_stream_msgs(lines)
         except Exception as e:
             logger.warning(f"hint rewrite failed: {e}")
         return None
@@ -6589,7 +6583,6 @@ class MarkdownConverterPlugin(Star):
 
         mode = mf.get("mode")
         has_img = bool(mf.get("has_image"))
-        hint_n = int(self._cfg("hint_message_count", 3) or 3)
 
         if mode == "full":
             md_blocks = re.findall(r"<md>([\s\S]*?)</md>", raw)
@@ -6621,13 +6614,13 @@ class MarkdownConverterPlugin(Star):
             lines = _extract_stream_lines_only(raw)
 
             if (not lines) or _looks_like_markdown_or_full(raw):
-                rewritten = await self._rewrite_to_stream(raw, hint_n, has_img)
+                rewritten = await self._rewrite_to_stream(raw, has_img)
                 if rewritten:
                     msgs = rewritten
                 else:
-                    msgs = _normalize_to_n_msgs([], hint_n)
+                    msgs = _normalize_stream_msgs([])
             else:
-                msgs = _normalize_to_n_msgs(lines, hint_n)
+                msgs = _normalize_stream_msgs(lines)
 
             event.set_extra("math_stream_msgs", msgs)
             # 写入对话记忆（hint：把提示流拼成一段存）
@@ -6657,7 +6650,7 @@ class MarkdownConverterPlugin(Star):
             if not isinstance(msgs, list) or not msgs:
                 raw_llm = event.get_extra("raw_llm") or ""
                 lines = _extract_stream_lines_only(raw_llm)
-                msgs = _normalize_to_n_msgs(lines, int(self._cfg("hint_message_count", 3) or 3))
+                msgs = _normalize_stream_msgs(lines)
 
             delay_ms = int(self._cfg("hint_send_delay_ms", 0) or 0)
             for m in msgs:

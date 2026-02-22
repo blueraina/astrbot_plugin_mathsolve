@@ -1,7 +1,7 @@
 {
   "enable_math_coach": {
     "type": "bool",
-    "description": "数学题答疑模式总开关（启用后：默认先多条口头提示，引导式答疑；用户明确要完整过程时才用图片完整解答）",
+    "description": "引导式答疑开关（启用后：数学题先多条口头提示引导，AI 根据题目难度自动调整提示条数；关闭后不触发引导式回答）",
     "default": true,
     "obvious_hint": true,
     "hint": "仅在数学题场景生效；非数学问题不改变任何行为"
@@ -17,17 +17,6 @@
     "description": "数学答疑人格（仅对数学题生效）",
     "default": "你是一个耐心的数学助教 说话像真人答疑 口语化 简短 温和但不啰嗦",
     "hint": "例如：「你是高三数学老师 说话很接地气 会用类比但不废话」"
-  },
-  "hint_message_count": {
-    "type": "int",
-    "description": "口头提示阶段：每次发送的短消息条数",
-    "default": 3,
-    "hint": "建议 2~5 条，条数越多越像真人「分段提示」",
-    "slider": {
-      "min": 2,
-      "max": 8,
-      "step": 1
-    }
   },
   "hint_send_delay_ms": {
     "type": "int",
