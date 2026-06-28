@@ -351,6 +351,22 @@ python -m playwright install chromium
 xelatex --version
 ```
 
+### PDF 已生成但发送失败，日志出现 `ENOENT`
+
+如果日志类似：
+
+```text
+ActionFailed retcode=1200
+ENOENT: no such file or directory, open '/opt/astrbot/data/plugins_data/.../xxx.pdf'
+```
+
+通常不是 PDF 编译失败，而是协议端无法读取 AstrBot 生成的本地文件路径。常见于 AstrBot 与 NapCat / OneBot 运行在不同容器或不同机器上。
+
+处理方式：
+
+- 在 AstrBot WebUI 的系统配置中设置可被协议端访问的 `callback_api_base`，让 AstrBot 把文件转成 `/api/file/<token>` 回调链接发送。
+- 或者让 NapCat / OneBot 与 AstrBot 共享并可读取同一个 `plugins_data` 路径。
+
 ### LaTeX 宏包缺失
 
 TeX Live 可用 `tlmgr install ...` 安装缺失宏包。MiKTeX 通常会在首次编译时自动下载。

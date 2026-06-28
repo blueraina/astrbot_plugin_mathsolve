@@ -46,22 +46,23 @@ def _md2img_tool_extract_ctx_event(wrapper: Any):
 
 async def _md2img_tool_send_components(plugin: Any, ctx: Any, event: Any, comps: List[Any]) -> Tuple[bool, Any]:
     """在 Tool 内主动发送消息（图片/PDF 等）。
-    返回 (ok, send_ret)。优先 event.send（可拿到回执/ message_id），失败则回退 ctx.send_message。
+    返回 (ok, send_ret_or_error)。优先 event.send（可拿到回执/ message_id），失败则回退 ctx.send_message。
     """
+    last_err: Any = None
     mc_or_list = plugin._build_msg_chain_from_components(comps)
     try:
         if event is not None and hasattr(event, "send") and callable(getattr(event, "send")):
             send_ret = await event.send(mc_or_list)
             return True, send_ret
-    except Exception:
-        pass
+    except Exception as e:
+        last_err = e
     try:
         if ctx is not None and hasattr(ctx, "send_message") and event is not None:
             await ctx.send_message(event.unified_msg_origin, mc_or_list)
             return True, None
-    except Exception:
-        pass
-    return False, None
+    except Exception as e:
+        last_err = e
+    return False, last_err
 
 @dataclass
 class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
@@ -190,14 +191,19 @@ class Md2ImgSolveMathPdfTool(FunctionTool[AstrAgentContext]):
 
         # 发送 PDF
         sent_msg_id: Optional[str] = None
+        send_ok = False
+        send_error: Any = None
         try:
             import astrbot.api.message_components as Comp
             comps = [Comp.File(file=pdf_path, name=fname)]
             ok, send_ret = await _md2img_tool_send_components(plugin, ctx, event, comps)
             if ok:
+                send_ok = True
                 sent_msg_id = plugin._extract_message_id_from_send_ret(send_ret)
-        except Exception:
-            ok = False
+            else:
+                send_error = send_ret
+        except Exception as e:
+            send_error = e
 
         # 更新 session 状态（供后续 /pdf 追问）
         try:
@@ -231,7 +237,20 @@ class Md2ImgSolveMathPdfTool(FunctionTool[AstrAgentContext]):
         except Exception:
             pass
 
-        return json.dumps({"ok": True, "pdf_path": pdf_path, "filename": fname, "message_id": sent_msg_id}, ensure_ascii=False)
+        if not send_ok:
+            plugin._log_pdf_file_send_failure("PDF Tool", pdf_path, fname, send_error)
+            return json.dumps(
+                {
+                    "ok": False,
+                    "send_ok": False,
+                    "pdf_path": pdf_path,
+                    "filename": fname,
+                    "error": plugin._pdf_file_send_failure_message(pdf_path, fname, send_error, label="PDF"),
+                },
+                ensure_ascii=False,
+            )
+
+        return json.dumps({"ok": True, "send_ok": True, "pdf_path": pdf_path, "filename": fname, "message_id": sent_msg_id}, ensure_ascii=False)
 
 @dataclass
 class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
@@ -279,14 +298,19 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
 
         # 发送 PDF
         sent_msg_id: Optional[str] = None
+        send_ok = False
+        send_error: Any = None
         try:
             import astrbot.api.message_components as Comp
             comps = [Comp.File(file=pdf_path, name=fname)]
             ok, send_ret = await _md2img_tool_send_components(plugin, ctx, event, comps)
             if ok:
+                send_ok = True
                 sent_msg_id = plugin._extract_message_id_from_send_ret(send_ret)
-        except Exception:
-            ok = False
+            else:
+                send_error = send_ret
+        except Exception as e:
+            send_error = e
 
         # 更新 session 状态（供后续 /pdf 追问）
         try:
@@ -320,7 +344,20 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
         except Exception:
             pass
 
-        return json.dumps({"ok": True, "pdf_path": pdf_path, "filename": fname, "message_id": sent_msg_id}, ensure_ascii=False)
+        if not send_ok:
+            plugin._log_pdf_file_send_failure("SPDF Tool", pdf_path, fname, send_error)
+            return json.dumps(
+                {
+                    "ok": False,
+                    "send_ok": False,
+                    "pdf_path": pdf_path,
+                    "filename": fname,
+                    "error": plugin._pdf_file_send_failure_message(pdf_path, fname, send_error, label="SPDF"),
+                },
+                ensure_ascii=False,
+            )
+
+        return json.dumps({"ok": True, "send_ok": True, "pdf_path": pdf_path, "filename": fname, "message_id": sent_msg_id}, ensure_ascii=False)
 
 
 # 插件定义
@@ -983,6 +1020,103 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
 
         return None
 
+    @staticmethod
+    def _astrbot_callback_api_base() -> str:
+        """读取 AstrBot 全局文件回调地址；为空时本地 File 会直接交给协议端读取。"""
+        try:
+            from astrbot.core import astrbot_config
+            return str(astrbot_config.get("callback_api_base", "") or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _pdf_local_file_info(pdf_path: str) -> Tuple[str, bool, int]:
+        try:
+            p = Path(str(pdf_path)).expanduser()
+            resolved = str(p.resolve())
+            exists = p.is_file()
+            size = int(p.stat().st_size) if exists else 0
+            return resolved, exists, size
+        except Exception:
+            return str(pdf_path), False, 0
+
+    @staticmethod
+    def _short_error_text(err: Any, limit: int = 700) -> str:
+        text = str(err or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def _log_pdf_file_send_failure(self, label: str, pdf_path: str, fname: str, err: Any) -> None:
+        resolved, exists, size = self._pdf_local_file_info(pdf_path)
+        callback_api_base = self._astrbot_callback_api_base()
+        logger.error(
+            f"{label} 文件发送失败: name={fname} path={resolved} "
+            f"exists={exists} size={size} callback_api_base={callback_api_base or '<empty>'} "
+            f"err={self._short_error_text(err, 1000)}"
+        )
+
+    def _pdf_file_send_failure_message(self, pdf_path: str, fname: str, err: Any, label: str = "PDF") -> str:
+        resolved, exists, size = self._pdf_local_file_info(pdf_path)
+        callback_api_base = self._astrbot_callback_api_base()
+        if not exists:
+            return (
+                f"❌ {label} 已生成流程结束，但本地文件不存在，无法发送。\n"
+                f"文件名：{fname}\n"
+                f"路径：{resolved}\n"
+                "请查看插件日志里的 PDF 生成/缓存目录错误。"
+            )
+
+        if callback_api_base:
+            hint = (
+                f"已检测到 callback_api_base：{callback_api_base}\n"
+                "请确认 NapCat/OneBot 协议端能访问这个地址；如果 AstrBot 在容器里，也要确认端口已对外暴露。"
+            )
+        else:
+            hint = (
+                "当前 AstrBot 的 callback_api_base 为空，AstrBot 会把本地文件路径直接交给 NapCat/OneBot。\n"
+                "如果协议端和 AstrBot 不在同一个文件系统/容器里，就会出现 ENOENT。"
+            )
+
+        err_text = self._short_error_text(err, 500)
+        return (
+            f"⚠️ {label} 已生成，但发送文件失败。\n"
+            f"文件名：{fname}\n"
+            f"大小：{size} bytes\n"
+            f"服务器路径：{resolved}\n\n"
+            f"{hint}\n\n"
+            "处理方式：在 AstrBot WebUI 配置可被协议端访问的 callback_api_base，"
+            "或让协议端容器/进程挂载并能读取同一个 plugins_data 路径。"
+            + (f"\n\n错误：{err_text}" if err_text else "")
+        )
+
+    async def _send_pdf_file_component(
+        self,
+        event: AstrMessageEvent,
+        Comp: Any,
+        chain_prefix: List[Any],
+        pdf_path: str,
+        fname: str,
+        label: str = "PDF",
+    ) -> Tuple[Optional[str], Optional[str]]:
+        resolved, exists, _size = self._pdf_local_file_info(pdf_path)
+        if not exists:
+            err = FileNotFoundError(resolved)
+            self._log_pdf_file_send_failure(label, pdf_path, fname, err)
+            return None, self._pdf_file_send_failure_message(pdf_path, fname, err, label=label)
+
+        chain = list(chain_prefix)
+        chain.append(Comp.File(file=resolved, name=fname))
+
+        try:
+            mc_or_chain = self._build_msg_chain_from_components(chain)
+            send_ret = await event.send(mc_or_chain)
+            return self._extract_message_id_from_send_ret(send_ret), None
+        except Exception as e:
+            self._log_pdf_file_send_failure(label, pdf_path, fname, e)
+            return None, self._pdf_file_send_failure_message(pdf_path, fname, e, label=label)
+
     # === 快捷指令 1: PC 模式 ===
     @filter.command("pc")
     async def cmd_pc(self, event: AstrMessageEvent):
@@ -1365,17 +1499,12 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
             chain.append(Comp.At(qq=uid))
         # === 修复结束 ===
 
-        chain.append(Comp.File(file=pdf_path, name=fname))
-
-        # 优先用 event.send 发送（若适配器支持，可拿到 message_id，便于后续“引用这条 PDF 消息”追问）
-        sent_msg_id: Optional[str] = None
-        try:
-            mc_or_chain = self._build_msg_chain_from_components(chain)
-            send_ret = await event.send(mc_or_chain)
-            sent_msg_id = self._extract_message_id_from_send_ret(send_ret)
-        except Exception as e:
-            logger.debug(f"event.send 发送 PDF 失败，回退为 chain_result: {e}")
-            yield event.chain_result(chain)
+        # 优先用 event.send 发送（若适配器支持，可拿到 message_id，便于后续“引用这条 PDF 消息”追问）。
+        # 文件消息发送失败时不要再 yield chain_result(chain)，否则 respond.stage 会用同一个坏路径重试一次。
+        sent_msg_id, send_error_msg = await self._send_pdf_file_component(event, Comp, chain, pdf_path, fname, label="PDF")
+        if send_error_msg:
+            yield event.plain_result(send_error_msg)
+            return
 
         # 若成功拿到 message_id，则把本次 PDF 的 LaTeX 源码与该消息绑定，供用户引用追问
         if sent_msg_id and generated_tex_src:
@@ -1631,16 +1760,11 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
         if uid and (not is_private):
             chain.append(Comp.At(qq=uid))
 
-        chain.append(Comp.File(file=pdf_path, name=fname))
-
         sent_msg_id: Optional[str] = None
-        try:
-            mc_or_chain = self._build_msg_chain_from_components(chain)
-            send_ret = await event.send(mc_or_chain)
-            sent_msg_id = self._extract_message_id_from_send_ret(send_ret)
-        except Exception as e:
-            logger.debug(f"event.send 发送 PDF 失败，回退为 chain_result: {e}")
-            yield event.chain_result(chain)
+        sent_msg_id, send_error_msg = await self._send_pdf_file_component(event, Comp, chain, pdf_path, fname, label="SPDF")
+        if send_error_msg:
+            yield event.plain_result(send_error_msg)
+            return
 
         if sent_msg_id and generated_tex_src:
             try:
