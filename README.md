@@ -296,9 +296,18 @@ $$
 | `session_ttl_sec` | `86400` | 会话状态保留时间 |
 | `last_image_valid_sec` | `3600` | 上一张图片可复用有效期 |
 | `pdf_reuse_last_image_with_text_mode` | `smart` | 文字追问时是否复用上一张图片 |
+| `cache_cleanup_enabled` | `true` | 启用磁盘缓存清理 |
+| `cache_cleanup_interval_sec` | `3600` | 清理 `md2img_cache` 和 `md2img_pdf_cache` 的周期 |
+| `cache_cleanup_protect_recent_sec` | `300` | 保护最近生成的文件，避免发送中被删除 |
+| `image_cache_ttl_sec` | `86400` | 图片缓存保留时间 |
+| `image_cache_max_files` | `1000` | 图片缓存最大文件数 |
+| `pdf_cache_ttl_sec` | `604800` | PDF 文件保留时间 |
+| `pdf_cache_max_files` | `300` | PDF 文件最大数量 |
 | `local_xelatex_timeout_sec` | `60` | 本地 xelatex 编译超时 |
 | `tex_compile_concurrency` | `2` | xelatex 编译并发上限 |
 | `texlive_cache_enabled` | `true` | 启用 TeX 编译缓存 |
+
+磁盘缓存清理只处理 `md2img_cache/` 和 `md2img_pdf_cache/` 顶层生成文件；`md2img_pdf_cache/_texlive_cache/` 仍由 `texlive_cache_max_files` 独立控制。
 
 完整配置项请参考 `_conf_schema.json`。
 

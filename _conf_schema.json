@@ -842,6 +842,78 @@
           "step": 60
         }
       },
+      "cache_cleanup_enabled": {
+        "type": "bool",
+        "description": "启用磁盘缓存清理",
+        "default": true,
+        "hint": "定期清理 md2img_cache 图片缓存和 md2img_pdf_cache 顶层 PDF 文件"
+      },
+      "cache_cleanup_interval_sec": {
+        "type": "int",
+        "description": "磁盘缓存清理间隔（秒）",
+        "default": 3600,
+        "hint": "默认每小时清理一次；修改后重启插件生效",
+        "slider": {
+          "min": 60,
+          "max": 86400,
+          "step": 60
+        }
+      },
+      "cache_cleanup_protect_recent_sec": {
+        "type": "int",
+        "description": "保护最近生成文件（秒）",
+        "default": 300,
+        "hint": "最近生成的文件不会被清理，避免和正在发送的 PDF/图片冲突",
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 60
+        }
+      },
+      "image_cache_ttl_sec": {
+        "type": "int",
+        "description": "图片缓存保留时间（秒）",
+        "default": 86400,
+        "hint": "md2img_cache 中超过该时间的图片/快照会被清理；0 表示不按时间清理",
+        "slider": {
+          "min": 0,
+          "max": 604800,
+          "step": 600
+        }
+      },
+      "image_cache_max_files": {
+        "type": "int",
+        "description": "图片缓存最大文件数",
+        "default": 1000,
+        "hint": "超过后按最旧优先清理；0 表示不按数量清理",
+        "slider": {
+          "min": 0,
+          "max": 10000,
+          "step": 100
+        }
+      },
+      "pdf_cache_ttl_sec": {
+        "type": "int",
+        "description": "PDF 文件保留时间（秒）",
+        "default": 604800,
+        "hint": "md2img_pdf_cache 顶层 PDF 超过该时间会被清理；0 表示不按时间清理",
+        "slider": {
+          "min": 0,
+          "max": 2592000,
+          "step": 3600
+        }
+      },
+      "pdf_cache_max_files": {
+        "type": "int",
+        "description": "PDF 文件最大数量",
+        "default": 300,
+        "hint": "只清理 md2img_pdf_cache 顶层文件，不清理 _texlive_cache 子目录；0 表示不按数量清理",
+        "slider": {
+          "min": 0,
+          "max": 5000,
+          "step": 50
+        }
+      },
       "last_image_valid_sec": {
         "type": "int",
         "description": "上一张图片可复用有效期（秒）",

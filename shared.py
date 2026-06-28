@@ -330,6 +330,17 @@ DEFAULT_CFG: Dict[str, Any] = {
     "session_ttl_sec": 86400,
     # session 清理间隔（秒），默认每小时
     "session_cleanup_interval_sec": 3600,
+    # 磁盘缓存清理：定期清理 md2img_cache 与 md2img_pdf_cache 顶层生成文件
+    "cache_cleanup_enabled": True,
+    "cache_cleanup_interval_sec": 3600,
+    # 保护刚生成的文件，避免后台清理和正在发送/渲染的文件撞车
+    "cache_cleanup_protect_recent_sec": 300,
+    # Markdown 渲染图片与图片快照缓存：默认保留 24 小时，最多 1000 个文件
+    "image_cache_ttl_sec": 86400,
+    "image_cache_max_files": 1000,
+    # /pdf、/spdf 最终 PDF：默认保留 7 天，最多 300 个文件
+    "pdf_cache_ttl_sec": 604800,
+    "pdf_cache_max_files": 300,
     # 上一张图用于 /pdf 的“有效期”（秒），默认 1 小时（仅用于预判提示）
     "last_image_valid_sec": 3600,
 

@@ -392,6 +392,7 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
 
         # Session 清理任务
         self._session_cleaner_task: Optional[asyncio.Task] = None
+        self._cache_cleaner_task: Optional[asyncio.Task] = None
         self._state_lock = asyncio.Lock()  # 最小侵入：统一保护 MATH_SESSION_STATE
 
         # TeXLive 编译日志
@@ -452,6 +453,7 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
 
             # 启动 session 清理任务
             self._start_session_cleaner()
+            self._start_cache_cleaner()
 
             logger.info("AstrBot mathsolve 插件已就绪 (1.11.0 - 本地编译版)")
         except Exception as e:
