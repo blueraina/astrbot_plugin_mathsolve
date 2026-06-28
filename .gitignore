@@ -10,6 +10,8 @@ build/
 *.log
 md2img_cache/
 md2img_pdf_cache/
-vendor/
+vendor/*
+!vendor/md2img/
+!vendor/md2img/**
 index-*.html
 example_*-*.png

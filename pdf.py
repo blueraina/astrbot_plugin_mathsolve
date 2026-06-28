@@ -184,13 +184,16 @@ class PdfMixin:
         ttl_sec = self._pdf_parse_timeout_value(self._cfg("pdf_provider_preflight_cache_ttl_sec", 300), 300)
         return 300 if ttl_sec is None else ttl_sec
 
+    @staticmethod
     def _pdf_is_data_image_ref(url: str) -> bool:
         return str(url or "").strip().lower().startswith("data:image/")
 
+    @staticmethod
     def _pdf_is_base64_image_ref(url: str) -> bool:
         u = str(url or "").strip()
         return u.startswith("base64://")
 
+    @staticmethod
     def _pdf_describe_image_ref(url: str) -> str:
         u = str(url or "")
         if u.startswith("data:"):
@@ -206,10 +209,12 @@ class PdfMixin:
                 return f"http_url_len={len(u)}"
         return str(Path(u).name or u)[:200]
 
+    @staticmethod
     def _pdf_is_http_image_url(url: str) -> bool:
         u = str(url or "").strip()
         return u.lower().startswith(("http://", "https://"))
 
+    @staticmethod
     def _pdf_file_uri_to_path(file_uri: str) -> str:
         parsed = urllib.parse.urlparse(str(file_uri or ""))
         if parsed.scheme.lower() != "file":
@@ -223,6 +228,7 @@ class PdfMixin:
             path = path[1:]
         return path
 
+    @staticmethod
     def _pdf_ref_to_local_path(url: str) -> str:
         u = str(url or "").strip()
         if not u:
@@ -303,6 +309,7 @@ class PdfMixin:
 
         return await self._pdf_snapshot_image_urls(refs)
 
+    @staticmethod
     def _pdf_guess_image_ext(url: str, content_type: str = "") -> str:
         ct = str(content_type or "").split(";", 1)[0].strip().lower()
         ext = mimetypes.guess_extension(ct) if ct else ""
