@@ -4,6 +4,8 @@
 
 一个功能丰富的 AstrBot 插件，集成 Markdown 渲染、数学，甚至全学科答疑、PDF 生成(支持画图)、DeepThink 多角色迭代求解、知识库检索及对话记忆等能力。
 
+> 外部联网搜索能力交给 AstrBot 自身的 Agent / 工具系统处理；本插件只保留数学答疑、本地知识库检索、渲染和 PDF 生成相关能力。
+
 **插件交流群:** 1077289182
 
 ## ✨ 功能特性
@@ -13,11 +15,11 @@
 - 通过 MathJax 完美渲染 LaTeX 数学公式
 - 支持 2 倍缩放高质量渲染
 - 支持固定宽度/自适应宽度模式
-- Playwright 浏览器自动安装与管理
+- 使用 Playwright Chromium 进行浏览器截图渲染
 
-### 📐 数学答疑提示流
-- 自动识别数学题（文字/图片），先给出引导提示，再按需提供完整解答
-- AI 根据题目难度自动调整提示条数（简单题 2–3 条，复杂题 4–6 条）
+### 📐 数学图文解答
+- 自动识别数学题（文字/图片），默认输出完整图文讲义解答
+- 使用 Markdown、LaTeX 和可选内联 SVG 生成适合群聊阅读的长图
 - 支持图片数学题识别
 - 自定义数学答疑人格（如"高三数学老师"）
 - 可选"路由模型"辅助判断意图
@@ -91,11 +93,11 @@
 ### 安装步骤
 
 1. 将插件文件夹放置到 AstrBot 的 `plugins` 目录下
-2. 重启 AstrBot 服务
-3. 插件会自动安装所需依赖（`mistune` 和 `playwright`）
+2. 安装 Python 依赖：`pip install -r requirements.txt`
+3. 重启 AstrBot 服务
 
 > [!NOTE]
-> 首次安装时会在后台异步安装 Playwright Chromium 浏览器，请在控制台中跟踪进度。
+> 插件启动时会在后台尝试运行 `python -m playwright install chromium` 安装/确认 Chromium；如果网络环境导致自动安装失败，可手动执行同一命令。仓库默认不包含 `vendor/`，无本地 MathJax/PagedJS 文件时会回退到 CDN；离线环境可自行放置对应文件到 `vendor/md2img/`。
 
 ### XeLaTeX 宏包要求（PDF 功能）
 
@@ -158,8 +160,9 @@ $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
 ### 数学答疑
 
 直接发送数学题（文字或图片），插件自动识别并进入答疑模式：
-- 默认先发送口头提示，引导思路（AI 根据题目难度自动调整提示条数）
-- 用户说"完整解答"/"详细过程"等关键词时，切换为完整解答模式
+- 默认输出完整图文讲义，不再走多条口头提示流
+- 如果用户明确说"提示"/"思路"/"先提示"，插件不接管该题，交给普通对话模型回答
+- 完整解答会使用 `<md>` 触发 Markdown 转图片；开启 `full_solution_prefer_svg_diagram` 后，几何/函数/积分区域/空间立体题会更倾向于直接写内联 SVG 示意图
 - 使用 `/pdf` 或 `/spdf` 指令可直接获取 PDF 格式解答
 
 ### 支持的 Markdown 语法
@@ -177,22 +180,44 @@ $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
 
 ## ⚙️ 配置说明
 
-所有配置可在 AstrBot WebUI 中修改。以下是主要配置分类：
+所有配置可在 AstrBot WebUI 中修改。当前配置已按分组整理，常用项在前，高级项在后；所有模型 provider 选择项均使用 AstrBot 的下拉选择器。
 
 ### 基础配置
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `enable_math_coach` | `true` | 引导式答疑提示流开关 |
+| `enable_math_coach` | `true` | 数学图文解答开关 |
 | `treat_image_as_math` | `true` | 图片默认按数学题处理 |
+| `full_solution_prefer_svg_diagram` | `true` | 完整解答中优先生成内联 SVG 示意图 |
 | `math_persona` | `"你是一个耐心的数学助教..."` | 数学答疑人格 |
+| `router_provider_id` | `""` | 路由模型（下拉选择；留空=不用专用路由模型） |
+
+### Markdown 渲染配置
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `reuse_playwright_browser` | `true` | 复用 Playwright 浏览器，通常更快 |
+| `auto_install_playwright_chromium` | `true` | 启动时后台自动安装/确认 Playwright Chromium |
+| `playwright_install_timeout_sec` | `600` | Playwright Chromium 后台安装超时 |
+| `render_concurrency` | `2` | Markdown 转图片并发数量上限 |
+| `playwright_render_timeout_sec` | `60` | Playwright 页面加载、截图等操作超时 |
+| `playwright_wait_until` | `networkidle` | 页面加载等待策略；偶发卡住时可改为 `domcontentloaded` |
+| `pagedjs_wait_timeout_sec` | `30` | PC 长内容分页等待 PagedJS 生成页面的超时 |
 
 ### PDF 配置
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `enable_pdf_output` | `true` | `/pdf` 指令开关 |
-| `pdf_provider_id` | `""` | PDF 使用的模型（留空=默认） |
+| `pdf_provider_id` | `""` | PDF 主模型（下拉选择；留空=默认） |
+| `pdf_provider_timeout_sec` | `180` | `/pdf` 主模型调用超时；超时/失败后尝试候补 |
+| `pdf_enable_provider_preflight` | `true` | 正式生成前先做模型连通性预检，失败/超时则切换候补 |
+| `pdf_provider_preflight_timeout_sec` | `8` | 模型连通性预检超时 |
+| `pdf_provider_preflight_cache_ttl_sec` | `300` | 预检成功结果缓存时间，失败不缓存，避免临时抖动导致持续跳过模型 |
+| `pdf_fallback_provider_id_1` ~ `pdf_fallback_provider_id_5` | `""` | `/pdf` 候补模型 1~5（均为下拉选择，按顺序回退） |
+| `pdf_fallback_provider_timeout_sec_1` ~ `pdf_fallback_provider_timeout_sec_5` | `180` | 每个候补模型各自的超时时间 |
+| `pdf_fallback_on_compile_error` | `true` | 某个模型返回内容但 LaTeX 编译失败时，继续尝试下一个候补模型重新生成 |
+| `pdf_snapshot_images_before_generation` | `true` | 生成前先把远程图片 URL 下载成本地快照，避免前置模型超时后临时图片链接过期 |
 | `pdf_enable_compile_guard` | `false` | LaTeX 编译自检与自动修复 |
 | `pdf_enable_completeness_guard` | `false` | 解答完整性自检 |
 
@@ -201,6 +226,10 @@ $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `enable_spdf_output` | `true` | `/spdf` 指令开关 |
+| `spdf_provider_id` | `""` | SPDF 基础模型（下拉选择；留空=当前会话模型） |
+| `spdf_solver_provider_id_1` ~ `spdf_solver_provider_id_4` | `""` | Solver 模型槽位（均为下拉选择；留空则回落到基础模型） |
+| `spdf_judge_provider_id` | `""` | Judge 模型（下拉选择；建议选更稳的模型） |
+| `spdf_cross_exam_provider_id` | `""` | 交叉质询模型（下拉选择；留空=各 Solver 自己质询） |
 | `spdf_num_solvers` | `3` | 候选解数量 |
 | `spdf_iter_rounds` | `2` | 迭代轮数 |
 | `spdf_enable_cross_exam` | `true` | 交叉质询 |
@@ -213,6 +242,8 @@ $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
 | `force_full_on_kb_query` | `true` | 知识库查询时直接完整回答 |
 | `enable_chat_memory` | `true` | 对话记忆开关 |
 | `chat_memory_max_turns` | `120` | 最大保存问答对数 |
+
+> 外部联网搜索不再作为插件配置项；如需联网搜索，请使用 AstrBot 自身 Agent 的联网/搜索工具能力。
 
 > 完整配置项请参考 `_conf_schema.json`。
 
@@ -254,4 +285,4 @@ $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
 
 ## 📄 许可证
 
-[CC BY-NC-SA 4.0](LICENSE)
+[MIT License](LICENSE)

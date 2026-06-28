@@ -2,9 +2,14 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
 dist/
 build/
 .env
 *.log
 md2img_cache/
 md2img_pdf_cache/
+vendor/
+index-*.html
+example_*-*.png
