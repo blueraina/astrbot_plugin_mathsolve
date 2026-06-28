@@ -137,6 +137,18 @@ python -m playwright install chromium
 
 仓库默认包含 `vendor/md2img/`，用户下载插件时会同时获得本地 MathJax/PagedJS 文件。正常情况下 Markdown 转图片不会依赖 CDN；只有本地文件缺失或被删掉时，插件才会回退到 CDN。
 
+### PDF 文件发送前置配置
+
+如果 AstrBot 和 NapCat / OneBot 不在同一个容器或同一台机器上，`/pdf`、`/spdf` 生成 PDF 后可能出现“文件已经生成，但发送失败”的情况。
+
+请在 **AstrBot 的系统配置** 中设置 `callback_api_base`，不是在本插件配置里设置。该地址必须是 NapCat / OneBot 能访问到的 AstrBot 地址，例如：
+
+```text
+http://你的服务器IP:6185
+```
+
+设置后，AstrBot 会把本地文件转换成可访问的回调链接再交给协议端发送。若不设置，协议端可能会尝试直接读取 `/opt/astrbot/data/plugins_data/.../xxx.pdf` 这类 AstrBot 容器内路径，从而报 `ENOENT`。
+
 ## XeLaTeX 宏包要求
 
 如果使用 `/pdf` 或 `/spdf`，需要本地安装 MiKTeX 或 TeX Live，并确保以下宏包可用：
@@ -375,7 +387,9 @@ ENOENT: no such file or directory, open '/opt/astrbot/data/plugins_data/.../xxx.
 
 处理方式：
 
-- 在 AstrBot WebUI 的系统配置中设置可被协议端访问的 `callback_api_base`，让 AstrBot 把文件转成 `/api/file/<token>` 回调链接发送。
+- 在 **AstrBot WebUI 的系统配置** 中设置可被协议端访问的 `callback_api_base`，不是插件配置。示例：`http://你的服务器IP:6185`。
+- 确认 NapCat / OneBot 能访问这个地址，不能只填 `127.0.0.1`，除非协议端和 AstrBot 在同一个网络命名空间里。
+- 设置后 AstrBot 会把文件转成 `/api/file/<token>` 回调链接发送，协议端不需要直接读取 AstrBot 容器内的 `plugins_data` 路径。
 - 或者让 NapCat / OneBot 与 AstrBot 共享并可读取同一个 `plugins_data` 路径。
 
 ### LaTeX 宏包缺失

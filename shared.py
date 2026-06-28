@@ -1607,6 +1607,46 @@ def _escape_text_preserve_dollar_math(s: str) -> str:
     return "".join(out_parts)
 
 
+_LATEX_SIZE_COMMAND_NAMES = (
+    "tiny",
+    "scriptsize",
+    "footnotesize",
+    "small",
+    "normalsize",
+    "large",
+    "Large",
+    "LARGE",
+    "huge",
+    "Huge",
+)
+
+_LATEX_SIZE_COMMAND_ALT = "|".join(_LATEX_SIZE_COMMAND_NAMES)
+_LATEX_SIZE_COMMAND_TOKEN = rf"(?:\\textbackslash\{{\}}|\\)(?:{_LATEX_SIZE_COMMAND_ALT})\b"
+_LATEX_SIZE_COMMAND_LINE_RE = re.compile(
+    rf"(?m)^([ \t]*)(?:{_LATEX_SIZE_COMMAND_TOKEN}[ \t]*)+([^\n]*)$"
+)
+_LATEX_SIZE_COMMAND_GROUPED_LINE_RE = re.compile(
+    rf"(?m)^([ \t]*)\{{[ \t]*(?:{_LATEX_SIZE_COMMAND_TOKEN}[ \t]*)+([^\n{{}}]*)\}}[ \t]*$"
+)
+
+
+def _strip_standalone_latex_size_commands(s: str) -> str:
+    """去掉模型偶发独立输出的字号命令，避免 PDF 里显示字面量 \\Large。"""
+    if not s:
+        return ""
+
+    def _repl(m: re.Match) -> str:
+        body = (m.group(2) or "").strip()
+        if not body:
+            return ""
+        return f"{m.group(1)}{body}"
+
+    t = str(s)
+    t = _LATEX_SIZE_COMMAND_GROUPED_LINE_RE.sub(_repl, t)
+    t = _LATEX_SIZE_COMMAND_LINE_RE.sub(_repl, t)
+    return t
+
+
 
 def _is_char_escaped_by_backslash(s: str, pos: int) -> bool:
     """判断 s[pos] 这个字符是否被前面的反斜杠转义（\\）。"""
@@ -1688,6 +1728,7 @@ def _sanitize_latex_fragment_for_xelatex(fragment: str) -> str:
     """
     t = _strip_all_code_fences(fragment or "")
     t = _strip_known_xml_like_tags(t)
+    t = _strip_standalone_latex_size_commands(t)
 
     # ================= [新增修复逻辑 Start] =================
     # 修复 Markdown 加粗语法转 LaTeX
@@ -2030,6 +2071,7 @@ def _llm_raw_to_safe_tex(raw: str) -> str:
     """
     t = _strip_all_code_fences(raw or "")
     t = _strip_known_xml_like_tags(t)
+    t = _strip_standalone_latex_size_commands(t)
     t = (t or "").strip()
     if not t:
         return ""
