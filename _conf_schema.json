@@ -1,73 +1,73 @@
 {
   "basic_math": {
     "type": "object",
-    "description": "????",
-    "hint": "????????????????????????????????????????",
+    "description": "基础答疑",
+    "hint": "控制数学图文答疑、图片题识别、答疑人格和可选路由模型。",
     "items": {
       "enable_math_coach": {
         "type": "bool",
-        "description": "????????",
+        "description": "启用数学图文答疑",
         "default": true,
-        "obvious_hint": true,
-        "hint": "?????????????????????? /pdf?/spdf ????????"
+        "hint": "关闭后不再自动接管数学题，但 /pdf、/spdf 命令仍可使用",
+        "obvious_hint": true
       },
       "treat_image_as_math": {
         "type": "bool",
-        "description": "????????????",
+        "description": "图片消息默认按数学题处理",
         "default": true,
-        "obvious_hint": true,
-        "hint": "??????????????????????"
+        "hint": "用户只发图片时也会进入完整图文解答流程",
+        "obvious_hint": true
       },
       "full_solution_prefer_svg_diagram": {
         "type": "bool",
-        "description": "????????????? SVG ???",
+        "description": "完整解答优先生成内联 SVG 示意图",
         "default": true,
-        "obvious_hint": true,
-        "hint": "??????????????????????????/??"
+        "hint": "适合几何、函数图像、积分区域、空间立体等题目",
+        "obvious_hint": true
       },
       "math_persona": {
         "type": "text",
-        "description": "??????",
-        "default": "??????????? ??????? ??? ?? ??????",
-        "hint": "??????????????????????????????????"
+        "description": "数学答疑人格",
+        "default": "你是一个耐心的数学助教 说话像真人答疑 口语化 简短 温和但不啰嗦",
+        "hint": "会注入到数学答疑系统提示中"
       },
       "use_router_model": {
         "type": "bool",
-        "description": "????????????",
+        "description": "启用路由模型辅助判断意图",
         "default": false,
-        "hint": "????????????????????/??????????????????"
+        "hint": "额外调用一个模型判断是否数学题/是否需要完整解答；更稳但更耗调用"
       },
       "router_provider_id": {
         "type": "string",
-        "description": "????",
+        "description": "路由模型",
         "default": "",
-        "hint": "????????????????????????",
+        "hint": "仅在启用路由模型时生效；留空则不使用专用路由模型",
         "_special": "select_provider"
       }
     }
   },
   "rendering": {
     "type": "object",
-    "description": "Markdown ??? / ??",
-    "hint": "?? Playwright?Chromium?PagedJS ?????????????????????",
+    "description": "Markdown 转图片 / 渲染",
+    "hint": "控制 Playwright、Chromium、PagedJS 分页和截图超时。渲染偶发超时时优先调这里。",
     "items": {
       "reuse_playwright_browser": {
         "type": "bool",
-        "description": "?? Playwright ???",
+        "description": "复用 Playwright 浏览器",
         "default": true,
-        "hint": "??????????????????????"
+        "hint": "通常建议开启，速度更快；异常时可临时关闭排查"
       },
       "auto_install_playwright_chromium": {
         "type": "bool",
-        "description": "???????/?? Chromium",
+        "description": "启动时后台安装/确认 Chromium",
         "default": true,
-        "hint": "???? python -m playwright install chromium????????????"
+        "hint": "后台运行 python -m playwright install chromium；已安装时通常会快速跳过"
       },
       "playwright_install_timeout_sec": {
         "type": "int",
-        "description": "Chromium ?????????",
+        "description": "Chromium 后台安装超时（秒）",
         "default": 600,
-        "hint": "????????????????? python -m playwright install chromium",
+        "hint": "网络慢时可调大；失败后也可手动执行 python -m playwright install chromium",
         "slider": {
           "min": 60,
           "max": 1800,
@@ -76,9 +76,9 @@
       },
       "render_concurrency": {
         "type": "int",
-        "description": "Markdown ???????",
+        "description": "Markdown 转图片并发上限",
         "default": 2,
-        "hint": "??????? CPU/?????????????????? 1~3 ??",
+        "hint": "过大会占用更多 CPU/内存；一般 1~3 较稳",
         "slider": {
           "min": 1,
           "max": 8,
@@ -87,9 +87,9 @@
       },
       "playwright_render_timeout_sec": {
         "type": "int",
-        "description": "Playwright ???????",
+        "description": "Playwright 操作超时（秒）",
         "default": 60,
-        "hint": "????????????????/??/SVG ????? 90~120 ?",
+        "hint": "控制页面加载、截图等操作；长公式/长图/SVG 多时可调到 90~120 秒",
         "slider": {
           "min": 10,
           "max": 300,
@@ -98,9 +98,9 @@
       },
       "playwright_wait_until": {
         "type": "string",
-        "description": "????????",
+        "description": "页面加载等待策略",
         "default": "networkidle",
-        "hint": "networkidle ?????????domcontentloaded ????????????",
+        "hint": "networkidle 更稳但可能等待久；domcontentloaded 更快，适合偶发卡住时使用",
         "options": [
           "networkidle",
           "domcontentloaded",
@@ -108,17 +108,17 @@
           "commit"
         ],
         "labels": [
-          "networkidle???????????",
-          "domcontentloaded????",
-          "load??? load?",
-          "commit????"
+          "networkidle（默认，等待网络空闲）",
+          "domcontentloaded（更快）",
+          "load（页面 load）",
+          "commit（最快）"
         ]
       },
       "pagedjs_wait_timeout_sec": {
         "type": "int",
-        "description": "PC ???? PagedJS ?????",
+        "description": "PC 分页等待 PagedJS 超时（秒）",
         "default": 30,
-        "hint": "??? /pc ???????????????????? 45~60 ?",
+        "hint": "只影响 /pc 长内容分页；长公式、长解答分页慢时可调到 45~60 秒",
         "slider": {
           "min": 5,
           "max": 120,
@@ -129,35 +129,35 @@
   },
   "pdf_generation": {
     "type": "object",
-    "description": "PDF ??",
-    "hint": "?? /pdf ???????????????????????????",
+    "description": "PDF 生成",
+    "hint": "控制 /pdf 的模型、候补模型、超时和图片快照。模型选择均为下拉框。",
     "items": {
       "enable_pdf_output": {
         "type": "bool",
-        "description": "?? /pdf ??",
+        "description": "启用 /pdf 指令",
         "default": true,
-        "obvious_hint": true,
-        "hint": "??? /pdf ????????? Markdown ???"
+        "hint": "关闭后 /pdf 不可用；不影响普通 Markdown 转图片",
+        "obvious_hint": true
       },
       "pdf_enable_compact_prompt_rules": {
         "type": "bool",
-        "description": "????????",
+        "description": "启用紧凑排版提示",
         "default": true,
-        "obvious_hint": true,
-        "hint": "?????????????? PDF ?????"
+        "hint": "减少不必要换行和行间公式，让 PDF 页数更紧凑",
+        "obvious_hint": true
       },
       "pdf_provider_id": {
         "type": "string",
-        "description": "/pdf ???",
+        "description": "/pdf 主模型",
         "default": "",
-        "hint": "??=?????????????????? LaTeX ???",
+        "hint": "留空=跟随当前会话模型；建议选择擅长数学与 LaTeX 的模型",
         "_special": "select_provider"
       },
       "pdf_provider_timeout_sec": {
         "type": "int",
-        "description": "/pdf ????????",
+        "description": "/pdf 主模型超时（秒）",
         "default": 180,
-        "hint": "0 ?????????????????????",
+        "hint": "0 表示不限制；超时或失败后会尝试候补模型",
         "slider": {
           "min": 0,
           "max": 600,
@@ -166,16 +166,16 @@
       },
       "pdf_enable_provider_preflight": {
         "type": "bool",
-        "description": "????????????",
+        "description": "生成前先做模型连通性预检",
         "default": true,
-        "obvious_hint": true,
-        "hint": "?? prompt ?????????????/???????????"
+        "hint": "用短 prompt 检查模型是否可用；失败/超时会切到候补模型",
+        "obvious_hint": true
       },
       "pdf_provider_preflight_timeout_sec": {
         "type": "int",
-        "description": "?????????",
+        "description": "模型预检超时（秒）",
         "default": 8,
-        "hint": "?? 3~15 ?????????????????????",
+        "hint": "建议 3~15 秒；过短可能误判慢模型",
         "slider": {
           "min": 1,
           "max": 60,
@@ -184,9 +184,9 @@
       },
       "pdf_provider_preflight_cache_ttl_sec": {
         "type": "int",
-        "description": "???????????",
+        "description": "预检成功缓存时间（秒）",
         "default": 300,
-        "hint": "???????????????????????0 ?????",
+        "hint": "失败不会缓存；0 表示不缓存",
         "slider": {
           "min": 0,
           "max": 3600,
@@ -195,16 +195,16 @@
       },
       "pdf_fallback_provider_id_1": {
         "type": "string",
-        "description": "/pdf ???? 1",
+        "description": "/pdf 候补模型 1",
         "default": "",
-        "hint": "???????????????",
+        "hint": "按顺序回退；留空则跳过这个槽位",
         "_special": "select_provider"
       },
       "pdf_fallback_provider_timeout_sec_1": {
         "type": "int",
-        "description": "???? 1 ?????",
+        "description": "候补模型 1 超时（秒）",
         "default": 180,
-        "hint": "0 ?????",
+        "hint": "0 表示不限制",
         "slider": {
           "min": 0,
           "max": 600,
@@ -213,16 +213,16 @@
       },
       "pdf_fallback_provider_id_2": {
         "type": "string",
-        "description": "/pdf ???? 2",
+        "description": "/pdf 候补模型 2",
         "default": "",
-        "hint": "???????????????",
+        "hint": "按顺序回退；留空则跳过这个槽位",
         "_special": "select_provider"
       },
       "pdf_fallback_provider_timeout_sec_2": {
         "type": "int",
-        "description": "???? 2 ?????",
+        "description": "候补模型 2 超时（秒）",
         "default": 180,
-        "hint": "0 ?????",
+        "hint": "0 表示不限制",
         "slider": {
           "min": 0,
           "max": 600,
@@ -231,16 +231,16 @@
       },
       "pdf_fallback_provider_id_3": {
         "type": "string",
-        "description": "/pdf ???? 3",
+        "description": "/pdf 候补模型 3",
         "default": "",
-        "hint": "???????????????",
+        "hint": "按顺序回退；留空则跳过这个槽位",
         "_special": "select_provider"
       },
       "pdf_fallback_provider_timeout_sec_3": {
         "type": "int",
-        "description": "???? 3 ?????",
+        "description": "候补模型 3 超时（秒）",
         "default": 180,
-        "hint": "0 ?????",
+        "hint": "0 表示不限制",
         "slider": {
           "min": 0,
           "max": 600,
@@ -249,16 +249,16 @@
       },
       "pdf_fallback_provider_id_4": {
         "type": "string",
-        "description": "/pdf ???? 4",
+        "description": "/pdf 候补模型 4",
         "default": "",
-        "hint": "???????????????",
+        "hint": "按顺序回退；留空则跳过这个槽位",
         "_special": "select_provider"
       },
       "pdf_fallback_provider_timeout_sec_4": {
         "type": "int",
-        "description": "???? 4 ?????",
+        "description": "候补模型 4 超时（秒）",
         "default": 180,
-        "hint": "0 ?????",
+        "hint": "0 表示不限制",
         "slider": {
           "min": 0,
           "max": 600,
@@ -267,16 +267,16 @@
       },
       "pdf_fallback_provider_id_5": {
         "type": "string",
-        "description": "/pdf ???? 5",
+        "description": "/pdf 候补模型 5",
         "default": "",
-        "hint": "???????????????",
+        "hint": "按顺序回退；留空则跳过这个槽位",
         "_special": "select_provider"
       },
       "pdf_fallback_provider_timeout_sec_5": {
         "type": "int",
-        "description": "???? 5 ?????",
+        "description": "候补模型 5 超时（秒）",
         "default": 180,
-        "hint": "0 ?????",
+        "hint": "0 表示不限制",
         "slider": {
           "min": 0,
           "max": 600,
@@ -285,23 +285,23 @@
       },
       "pdf_fallback_on_compile_error": {
         "type": "bool",
-        "description": "LaTeX ?????????????",
+        "description": "LaTeX 编译失败时继续尝试候补模型",
         "default": true,
-        "obvious_hint": true,
-        "hint": "???????????????????????????"
+        "hint": "某个模型返回内容但编译失败时，继续换下一个模型重新生成",
+        "obvious_hint": true
       },
       "pdf_snapshot_images_before_generation": {
         "type": "bool",
-        "description": "?????????",
+        "description": "生成前快照远程图片",
         "default": true,
-        "obvious_hint": true,
-        "hint": "???? URL ?????????????????????????"
+        "hint": "先把图片 URL 下载成本地快照，避免前置模型超时后临时图片链接过期",
+        "obvious_hint": true
       },
       "pdf_snapshot_image_timeout_sec": {
         "type": "int",
-        "description": "???????????",
+        "description": "图片快照下载超时（秒）",
         "default": 15,
-        "hint": "????????????????",
+        "hint": "图片链接慢或临时失效时可适当调大",
         "slider": {
           "min": 3,
           "max": 120,
@@ -310,9 +310,9 @@
       },
       "pdf_snapshot_image_max_bytes": {
         "type": "int",
-        "description": "????????????",
+        "description": "图片快照最大体积（字节）",
         "default": 26214400,
-        "hint": "?? 25MB???????????????",
+        "hint": "默认 25MB；过大图片会占用更多内存与磁盘",
         "slider": {
           "min": 1048576,
           "max": 104857600,
@@ -323,34 +323,34 @@
   },
   "pdf_guard": {
     "type": "object",
-    "description": "PDF ?? / ??",
-    "hint": "?????????? LaTeX ?????????????????????????",
+    "description": "PDF 自检 / 修复",
+    "hint": "高级功能：让模型检查 LaTeX 编译错误或解答完整性。更稳，但会增加模型调用次数。",
     "items": {
       "spdf_disable_tools_during_generation": {
         "type": "bool",
-        "description": "PDF/SPDF ?????? tools/function-calling",
+        "description": "PDF/SPDF 生成阶段禁用 tools/function-calling",
         "default": true,
-        "hint": "???????? tool_calls/function_call ?? LaTeX ?????"
+        "hint": "避免部分模型返回 tool_calls/function_call 导致 LaTeX 输出被破坏"
       },
       "pdf_enable_compile_guard": {
         "type": "bool",
-        "description": "?? LaTeX ?????????",
+        "description": "启用 LaTeX 编译自检与自动修复",
         "default": false,
-        "obvious_hint": true,
-        "hint": "?????????????????????"
+        "hint": "编译失败时把日志反馈给模型重写；更稳但更慢",
+        "obvious_hint": true
       },
       "pdf_guard_provider_id": {
         "type": "string",
-        "description": "PDF ??????",
+        "description": "PDF 编译判错模型",
         "default": "",
-        "hint": "??????????????????/?????",
+        "hint": "仅在编译自检开启时生效；建议选择便宜/快的小模型",
         "_special": "select_provider"
       },
       "pdf_guard_max_rounds": {
         "type": "int",
-        "description": "????????",
+        "description": "编译修复最大轮数",
         "default": 3,
-        "hint": "????????????",
+        "hint": "轮数越多越稳，但耗时越长",
         "slider": {
           "min": 0,
           "max": 8,
@@ -359,9 +359,9 @@
       },
       "pdf_guard_log_tail_chars": {
         "type": "int",
-        "description": "????????????",
+        "description": "反馈给模型的编译日志长度",
         "default": 4000,
-        "hint": "??????? token??? 2000~8000 ??",
+        "hint": "日志太长会浪费 token；一般 2000~8000 足够",
         "slider": {
           "min": 500,
           "max": 20000,
@@ -370,29 +370,29 @@
       },
       "pdf_guard_include_tex_in_feedback": {
         "type": "bool",
-        "description": "?????????? TeX",
+        "description": "修复时附带上一版完整 TeX",
         "default": true,
-        "hint": "??????? token????????"
+        "hint": "开启更稳但更耗 token；担心成本可关闭"
       },
       "pdf_enable_completeness_guard": {
         "type": "bool",
-        "description": "?????????",
+        "description": "启用解答完整性自检",
         "default": false,
-        "obvious_hint": true,
-        "hint": "?????????????????????"
+        "hint": "检查是否漏答、未写完；更稳但会额外调用模型",
+        "obvious_hint": true
       },
       "pdf_completeness_guard_provider_id": {
         "type": "string",
-        "description": "PDF ???????",
+        "description": "PDF 完整性判定模型",
         "default": "",
-        "hint": "???????????????????/?????",
+        "hint": "仅在完整性自检开启时生效；建议选择便宜/快的小模型",
         "_special": "select_provider"
       },
       "pdf_completeness_guard_max_rounds": {
         "type": "int",
-        "description": "?????????",
+        "description": "完整性补全最大轮数",
         "default": 2,
-        "hint": "????????????/?? token",
+        "hint": "轮数越大越死磕，但更耗时/更费 token",
         "slider": {
           "min": 0,
           "max": 6,
@@ -401,83 +401,83 @@
       },
       "pdf_completeness_guard_include_tex_in_feedback": {
         "type": "bool",
-        "description": "????????????? TeX",
+        "description": "完整性补全时附带上一版完整 TeX",
         "default": false,
-        "hint": "????????????? token"
+        "hint": "开启可提升补全质量，但更费 token"
       },
       "pdf_completeness_require_end_marker": {
         "type": "bool",
-        "description": "??????????????",
+        "description": "要求解答结尾包含证明完毕标记",
         "default": true,
-        "obvious_hint": true,
-        "hint": "?????????? \\blacksquare"
+        "hint": "默认要求最终解答包含 \\blacksquare",
+        "obvious_hint": true
       },
       "pdf_completeness_end_marker_text": {
         "type": "string",
-        "description": "???????",
+        "description": "完整性结尾标记",
         "default": "\\blacksquare",
-        "hint": "??????????? amssymb ??"
+        "hint": "默认黑色实心方块；需要 amssymb 支持"
       },
       "pdf_completeness_marker_only": {
         "type": "bool",
-        "description": "???????????",
+        "description": "仅依赖结尾标记判定写完",
         "default": true,
-        "hint": "?????????????????????"
+        "hint": "开启更强更稳；关闭会继续调用完整性守门模型"
       }
     }
   },
   "spdf_deepthink": {
     "type": "object",
     "description": "SPDF DeepThink",
-    "hint": "?? /spdf ??????Judge????Python ???TikZ ???????????????????",
+    "hint": "控制 /spdf 多角色候选、Judge、质询、Python 验算、TikZ 预检和后处理。所有模型选择均为下拉框。",
     "items": {
       "enable_spdf_output": {
         "type": "bool",
-        "description": "?? /spdf ??",
+        "description": "启用 /spdf 指令",
         "default": true,
-        "obvious_hint": true,
-        "hint": "??? /spdf ??????? /pdf"
+        "hint": "关闭后 /spdf 不可用；不影响 /pdf",
+        "obvious_hint": true
       },
       "spdf_provider_id": {
         "type": "string",
-        "description": "SPDF ????",
+        "description": "SPDF 基础模型",
         "default": "",
-        "hint": "??=?????????Solver/Judge ???????????",
+        "hint": "留空=跟随当前会话模型；Solver/Judge 未单独选择时会回落到它",
         "_special": "select_provider"
       },
       "spdf_solver_provider_id_1": {
         "type": "string",
-        "description": "Solver ?? 1",
+        "description": "Solver 模型 1",
         "default": "",
-        "hint": "??=?? SPDF ??????? Solver ??????????",
+        "hint": "留空=使用 SPDF 基础模型；多个 Solver 会按槽位顺序循环使用",
         "_special": "select_provider"
       },
       "spdf_solver_provider_id_2": {
         "type": "string",
-        "description": "Solver ?? 2",
+        "description": "Solver 模型 2",
         "default": "",
-        "hint": "??=???????????/????????",
+        "hint": "留空=跳过；适合配置不同风格/不同供应商的模型",
         "_special": "select_provider"
       },
       "spdf_solver_provider_id_3": {
         "type": "string",
-        "description": "Solver ?? 3",
+        "description": "Solver 模型 3",
         "default": "",
-        "hint": "??=????????? Solver ???????????",
+        "hint": "留空=跳过；如果只填一个 Solver 模型，则所有候选都用它",
         "_special": "select_provider"
       },
       "spdf_solver_provider_id_4": {
         "type": "string",
-        "description": "Solver ?? 4",
+        "description": "Solver 模型 4",
         "default": "",
-        "hint": "??=????????? 4 ? Solver ??",
+        "hint": "留空=跳过；当前内置最多 4 个 Solver 角色",
         "_special": "select_provider"
       },
       "spdf_num_solvers": {
         "type": "int",
-        "description": "?????",
+        "description": "候选解数量",
         "default": 3,
-        "hint": "?? 4 ???????????? token",
+        "hint": "最多 4 个；越多越稳但更慢、更费 token",
         "slider": {
           "min": 1,
           "max": 4,
@@ -486,9 +486,9 @@
       },
       "spdf_iter_rounds": {
         "type": "int",
-        "description": "DeepThink ????",
+        "description": "DeepThink 迭代轮数",
         "default": 2,
-        "hint": "??????????????Judge??? 1~2 ??",
+        "hint": "每轮都会重新生成候选、质询、Judge；一般 1~2 足够",
         "slider": {
           "min": 1,
           "max": 8,
@@ -497,9 +497,9 @@
       },
       "spdf_solver_concurrency": {
         "type": "int",
-        "description": "Solver ???",
+        "description": "Solver 并发数",
         "default": 2,
-        "hint": "?????????/??????? 1~3 ??",
+        "hint": "避免一次性打满并发/触发限流；一般 1~3 较稳",
         "slider": {
           "min": 1,
           "max": 8,
@@ -508,35 +508,35 @@
       },
       "spdf_enable_cross_exam": {
         "type": "bool",
-        "description": "??????",
+        "description": "启用交叉质询",
         "default": true,
-        "hint": "????????????????????"
+        "hint": "让候选解互相挑错，提升可靠性但增加调用量"
       },
       "spdf_cross_exam_provider_id": {
         "type": "string",
-        "description": "??????",
+        "description": "交叉质询模型",
         "default": "",
-        "hint": "??=? Solver ??????????????????",
+        "hint": "留空=各 Solver 自己质询；也可选一个更强模型统一质询",
         "_special": "select_provider"
       },
       "spdf_enable_self_consistency_vote": {
         "type": "bool",
-        "description": "???????",
+        "description": "启用自一致投票",
         "default": true,
-        "hint": "??? Solver ? top ??????? Judge ??"
+        "hint": "让多个 Solver 对 top 候选投票，辅助 Judge 判断"
       },
       "spdf_judge_provider_id": {
         "type": "string",
-        "description": "Judge ??",
+        "description": "Judge 模型",
         "default": "",
-        "hint": "??????????????=SPDF ????/??????",
+        "hint": "建议选择更稳更强的模型；留空=SPDF 基础模型/当前会话模型",
         "_special": "select_provider"
       },
       "spdf_candidate_char_budget": {
         "type": "int",
-        "description": "Judge ????????",
+        "description": "Judge 候选内容字符预算",
         "default": 14000,
-        "hint": "??????? token??? 8000~20000 ??",
+        "hint": "越大越稳但越费 token；一般 8000~20000 足够",
         "slider": {
           "min": 2000,
           "max": 50000,
@@ -545,15 +545,15 @@
       },
       "spdf_enable_python_check": {
         "type": "bool",
-        "description": "?? Python ??",
+        "description": "启用 Python 验算",
         "default": true,
-        "hint": "?????? Judge ???? Python ?????????????"
+        "hint": "会在本地执行 Judge 生成的短 Python 脚本；公共服务器请谨慎开启"
       },
       "spdf_python_check_timeout_sec": {
         "type": "int",
-        "description": "Python ??????????",
+        "description": "Python 验算单脚本超时（秒）",
         "default": 6,
-        "hint": "???????????????",
+        "hint": "超时会标记失败；不是强安全沙箱",
         "slider": {
           "min": 1,
           "max": 30,
@@ -562,9 +562,9 @@
       },
       "spdf_python_check_max_checks_per_candidate": {
         "type": "int",
-        "description": "???????????",
+        "description": "每个候选最多验算脚本数",
         "default": 3,
-        "hint": "??????????",
+        "hint": "减少可降低耗时与风险",
         "slider": {
           "min": 0,
           "max": 10,
@@ -573,22 +573,22 @@
       },
       "spdf_enable_tikz_preflight": {
         "type": "bool",
-        "description": "?? TikZ ????????",
+        "description": "启用 TikZ 预编译与自动修复",
         "default": true,
-        "hint": "????? TikZ ???????????"
+        "hint": "先最小编译 TikZ 片段，失败时让模型修复"
       },
       "spdf_tikz_preflight_provider_id": {
         "type": "string",
-        "description": "TikZ ????",
+        "description": "TikZ 修复模型",
         "default": "",
-        "hint": "??=SPDF ??????????/?????",
+        "hint": "留空=SPDF 基础模型；建议选便宜/快的小模型",
         "_special": "select_provider"
       },
       "spdf_tikz_preflight_max_rounds": {
         "type": "int",
-        "description": "TikZ ??????",
+        "description": "TikZ 修复最大轮数",
         "default": 2,
-        "hint": "?????????",
+        "hint": "轮数越多越稳但越慢",
         "slider": {
           "min": 0,
           "max": 6,
@@ -597,22 +597,22 @@
       },
       "spdf_enable_post_formatter": {
         "type": "bool",
-        "description": "??????????",
+        "description": "启用最终后处理格式化",
         "default": true,
-        "hint": "?????????????????? PDF ??????"
+        "hint": "修正标签不规范、英文过多等问题，转为 PDF 标准三段格式"
       },
       "spdf_post_formatter_provider_id": {
         "type": "string",
-        "description": "SPDF ????????",
+        "description": "SPDF 后处理格式化模型",
         "default": "",
-        "hint": "??=Judge/?????????????????/???",
+        "hint": "留空=Judge/基础模型；主要负责翻译和排版，便宜/快即可",
         "_special": "select_provider"
       },
       "spdf_post_formatter_input_char_budget": {
         "type": "int",
-        "description": "?????????",
+        "description": "后处理输入字符预算",
         "default": 16000,
-        "hint": "??????? token??? 8000~20000 ??",
+        "hint": "越大越稳但更费 token；一般 8000~20000 足够",
         "slider": {
           "min": 2000,
           "max": 50000,
@@ -623,21 +623,21 @@
   },
   "knowledge_memory": {
     "type": "object",
-    "description": "????????",
-    "hint": "?????????????????????????????????? AstrBot Agent ?????",
+    "description": "知识库与对话记忆",
+    "hint": "本地知识库检索和短期对话记忆。这里不是外部联网搜索；外部联网能力交给 AstrBot Agent 自身处理。",
     "items": {
       "force_full_on_kb_query": {
         "type": "bool",
-        "description": "??????????????",
+        "description": "知识库查询时输出完整图文回答",
         "default": true,
-        "obvious_hint": true,
-        "hint": "???????/????????????????"
+        "hint": "用户询问知识库/题库类似题时，强制走完整回答格式",
+        "obvious_hint": true
       },
       "kb_agent_max_steps": {
         "type": "int",
-        "description": "????? Agent ????",
+        "description": "知识库工具 Agent 最大步数",
         "default": 8,
-        "hint": "?? 3~8 ??",
+        "hint": "通常 3~8 足够",
         "slider": {
           "min": 1,
           "max": 20,
@@ -646,9 +646,9 @@
       },
       "kb_tool_call_timeout_sec": {
         "type": "int",
-        "description": "??????????????",
+        "description": "知识库工具单次调用超时（秒）",
         "default": 60,
-        "hint": "?????????",
+        "hint": "知识库较慢时可调大",
         "slider": {
           "min": 5,
           "max": 300,
@@ -657,9 +657,9 @@
       },
       "kb_default_pick_count": {
         "type": "int",
-        "description": "???????????",
+        "description": "默认返回知识库结果数量",
         "default": 2,
-        "hint": "????????????",
+        "hint": "用户没明确要几道题时使用",
         "slider": {
           "min": 1,
           "max": 10,
@@ -668,9 +668,9 @@
       },
       "kb_insufficient_strategy": {
         "type": "string",
-        "description": "?????????????",
+        "description": "知识库命中不足时的补位策略",
         "default": "expand",
-        "hint": "none=???expand=?? query ?????placeholder=?????generate=???????????",
+        "hint": "none=不补；expand=扩大 query 继续检索；placeholder=占位说明；generate=外部生成并标注非知识库",
         "options": [
           "none",
           "expand",
@@ -678,17 +678,17 @@
           "generate"
         ],
         "labels": [
-          "???",
-          "????????",
-          "????",
-          "???????"
+          "不补位",
+          "扩大检索（推荐）",
+          "占位说明",
+          "外部生成并标注"
         ]
       },
       "kb_retry_rounds": {
         "type": "int",
-        "description": "?????????",
+        "description": "知识库检索重试轮数",
         "default": 3,
-        "hint": "?? query ?? + ??????",
+        "hint": "不同 query 候选 + 排除已选出处",
         "slider": {
           "min": 0,
           "max": 10,
@@ -697,9 +697,9 @@
       },
       "kb_max_query_candidates": {
         "type": "int",
-        "description": "???? query ???",
+        "description": "每轮最多 query 候选数",
         "default": 4,
-        "hint": "???????????",
+        "hint": "过大可能增加工具调用量",
         "slider": {
           "min": 1,
           "max": 10,
@@ -708,9 +708,9 @@
       },
       "kb_fetch_multiplier": {
         "type": "int",
-        "description": "????????",
+        "description": "检索候选数量倍率",
         "default": 3,
-        "hint": "???????????",
+        "hint": "用于去重后仍能凑够结果",
         "slider": {
           "min": 1,
           "max": 8,
@@ -719,9 +719,9 @@
       },
       "kb_generate_retry_rounds": {
         "type": "int",
-        "description": "??????????",
+        "description": "外部生成补位最大重试",
         "default": 2,
-        "hint": "? kb_insufficient_strategy=generate ???",
+        "hint": "仅 kb_insufficient_strategy=generate 时使用",
         "slider": {
           "min": 0,
           "max": 5,
@@ -730,22 +730,22 @@
       },
       "kb_external_source_label": {
         "type": "string",
-        "description": "??????????",
-        "default": "????(????)",
-        "hint": "?????????????"
+        "description": "外部生成补位来源标识",
+        "default": "外部生成(非知识库)",
+        "hint": "避免把生成题冒充知识库命中"
       },
       "enable_chat_memory": {
         "type": "bool",
-        "description": "????????",
+        "description": "启用短期对话记忆",
         "default": true,
-        "obvious_hint": true,
-        "hint": "????????????????????????????"
+        "hint": "保存历史问答并按相似度注入上下文；图片题默认不注入旧问答",
+        "obvious_hint": true
       },
       "chat_memory_max_turns": {
         "type": "int",
-        "description": "???????????",
+        "description": "每个会话最多保存问答对",
         "default": 120,
-        "hint": "?????????",
+        "hint": "超过后丢弃最旧记录",
         "slider": {
           "min": 0,
           "max": 500,
@@ -754,9 +754,9 @@
       },
       "chat_memory_recent_turns": {
         "type": "int",
-        "description": "??????????",
+        "description": "记忆检索保留最近轮数",
         "default": 6,
-        "hint": "????????????",
+        "hint": "近期对话会优先进入上下文",
         "slider": {
           "min": 0,
           "max": 50,
@@ -765,9 +765,9 @@
       },
       "chat_memory_retrieve_k": {
         "type": "int",
-        "description": "??????????",
+        "description": "相似记忆最多注入条数",
         "default": 6,
-        "hint": "???????? token",
+        "hint": "越大越连续但越费 token",
         "slider": {
           "min": 0,
           "max": 20,
@@ -776,9 +776,9 @@
       },
       "chat_memory_min_score": {
         "type": "float",
-        "description": "???????",
+        "description": "相似记忆最低分",
         "default": 0.12,
-        "hint": "????????????????",
+        "hint": "越高越严格，越低越容易注入旧话题",
         "slider": {
           "min": 0.0,
           "max": 1.0,
@@ -787,9 +787,9 @@
       },
       "chat_memory_char_budget": {
         "type": "int",
-        "description": "????????",
+        "description": "记忆注入字符预算",
         "default": 3500,
-        "hint": "???????? token",
+        "hint": "越大越连续但越费 token",
         "slider": {
           "min": 0,
           "max": 20000,
@@ -798,9 +798,9 @@
       },
       "chat_memory_recency_half_life_sec": {
         "type": "int",
-        "description": "???????????",
+        "description": "记忆新鲜度半衰期（秒）",
         "default": 21600,
-        "hint": "?? 6 ????????????",
+        "hint": "默认 6 小时；越小越偏向近期对话",
         "slider": {
           "min": 600,
           "max": 604800,
@@ -809,22 +809,22 @@
       },
       "chat_memory_store_commands": {
         "type": "bool",
-        "description": "?????????",
+        "description": "记忆中保存命令消息",
         "default": false,
-        "hint": "????? /pdf?/spdf ????????????????"
+        "hint": "默认不保存 /pdf、/spdf 等命令，避免命令污染普通问答记忆"
       }
     }
   },
   "runtime_advanced": {
     "type": "object",
-    "description": "??????",
-    "hint": "????????????TeX ?????????????????",
+    "description": "运行时高级项",
+    "hint": "会话清理、追问复用图片、TeX 编译并发和缓存。一般保持默认即可。",
     "items": {
       "session_ttl_sec": {
         "type": "int",
-        "description": "???????????",
+        "description": "会话状态保留时间（秒）",
         "default": 86400,
-        "hint": "?? 24 ??",
+        "hint": "默认 24 小时",
         "slider": {
           "min": 600,
           "max": 604800,
@@ -833,9 +833,9 @@
       },
       "session_cleanup_interval_sec": {
         "type": "int",
-        "description": "?????????",
+        "description": "会话清理间隔（秒）",
         "default": 3600,
-        "hint": "?????????",
+        "hint": "默认每小时清理一次",
         "slider": {
           "min": 60,
           "max": 86400,
@@ -844,9 +844,9 @@
       },
       "last_image_valid_sec": {
         "type": "int",
-        "description": "??????????????",
+        "description": "上一张图片可复用有效期（秒）",
         "default": 3600,
-        "hint": "???????????????????",
+        "hint": "只用于预判提示；过期后建议用户重新发图",
         "slider": {
           "min": 60,
           "max": 86400,
@@ -855,25 +855,25 @@
       },
       "pdf_reuse_last_image_with_text_mode": {
         "type": "string",
-        "description": "????????????",
+        "description": "文字追问时复用上一张图片",
         "default": "smart",
-        "hint": "smart=????????always=?????never=????",
+        "hint": "smart=仅像追问时复用；always=总是复用；never=永不复用",
         "options": [
           "smart",
           "always",
           "never"
         ],
         "labels": [
-          "????????",
-          "????",
-          "????"
+          "智能判断（推荐）",
+          "总是复用",
+          "永不复用"
         ]
       },
       "pdf_followup_text_max_len": {
         "type": "int",
-        "description": "??????????",
+        "description": "智能复用的短文本阈值",
         "default": 40,
-        "hint": "?????????????????",
+        "hint": "短文本且不像新题时更容易判定为追问",
         "slider": {
           "min": 5,
           "max": 200,
@@ -882,15 +882,15 @@
       },
       "stop_event_on_hint": {
         "type": "bool",
-        "description": "???????????",
+        "description": "提示流模式阻止后续事件",
         "default": true,
-        "hint": "????????????????????"
+        "hint": "兼容旧行为；目前完整图文讲义是默认主路径"
       },
       "local_xelatex_timeout_sec": {
         "type": "int",
-        "description": "?? xelatex ???????",
+        "description": "本地 xelatex 编译超时（秒）",
         "default": 60,
-        "hint": "?? TikZ/PDF ?????",
+        "hint": "复杂 TikZ/PDF 可适当调大",
         "slider": {
           "min": 10,
           "max": 600,
@@ -899,9 +899,9 @@
       },
       "tex_compile_concurrency": {
         "type": "int",
-        "description": "xelatex ??????",
+        "description": "xelatex 编译并发上限",
         "default": 2,
-        "hint": "?????? PDF ???????",
+        "hint": "同时生成多个 PDF 时的最大并行数",
         "slider": {
           "min": 1,
           "max": 8,
@@ -910,15 +910,15 @@
       },
       "texlive_cache_enabled": {
         "type": "bool",
-        "description": "?? TeX ????",
+        "description": "启用 TeX 编译缓存",
         "default": true,
-        "hint": "??????????"
+        "hint": "避免重复编译相同内容"
       },
       "texlive_cache_max_files": {
         "type": "int",
-        "description": "TeX ?????????",
+        "description": "TeX 编译缓存最大文件数",
         "default": 500,
-        "hint": "?????????",
+        "hint": "超过后会清理旧缓存",
         "slider": {
           "min": 0,
           "max": 5000,
