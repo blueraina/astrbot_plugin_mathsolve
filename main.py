@@ -2481,7 +2481,11 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
             pass
 
         user_text = (getattr(event, "message_str", "") or "").strip()
-        kb_query = _is_kb_query(user_text)
+        plugin_kb_enabled = bool(self._cfg("enable_plugin_kb_integration", False))
+        raw_kb_query = _is_kb_query(user_text)
+        if raw_kb_query and not plugin_kb_enabled:
+            return
+        kb_query = raw_kb_query
         kb_n = _extract_kb_pick_count(user_text, int(self._cfg("kb_default_pick_count", 2) or 2))
 
         # 确保知识库工具处于激活状态（适配 kb_agentic_mode 等场景）

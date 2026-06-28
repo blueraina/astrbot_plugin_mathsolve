@@ -624,13 +624,20 @@
   "knowledge_memory": {
     "type": "object",
     "description": "知识库与对话记忆",
-    "hint": "本地知识库检索和短期对话记忆。这里不是外部联网搜索；外部联网能力交给 AstrBot Agent 自身处理。",
+    "hint": "插件知识库增强和短期对话记忆。插件知识库增强默认关闭；关闭时知识库调用交给 AstrBot Agent 自身处理。",
     "items": {
+      "enable_plugin_kb_integration": {
+        "type": "bool",
+        "description": "启用插件知识库增强",
+        "default": false,
+        "hint": "关闭后插件不再识别知识库/题库意图，也不主动调用 astr_kb_search；由 AstrBot Agent 自己处理知识库工具",
+        "obvious_hint": true
+      },
       "force_full_on_kb_query": {
         "type": "bool",
         "description": "知识库查询时输出完整图文回答",
         "default": true,
-        "hint": "用户询问知识库/题库类似题时，强制走完整回答格式",
+        "hint": "仅在启用插件知识库增强时生效；用户询问知识库/题库类似题时，强制走完整回答格式",
         "obvious_hint": true
       },
       "kb_agent_max_steps": {

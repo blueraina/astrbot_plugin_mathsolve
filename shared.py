@@ -373,6 +373,8 @@ DEFAULT_CFG: Dict[str, Any] = {
     "texlive_cache_max_files": 500,
 
     # ========= 新增：知识库问答/检索增强 =========
+    # 是否启用插件自己的知识库意图识别与 astr_kb_search 调用；关闭后交给 AstrBot Agent 自身处理
+    "enable_plugin_kb_integration": False,
     # 当用户询问“知识库/题库里有没有相关题目、从知识库挑题、给出处”等意图时，强制走 full 模式（图片直接出完整回答）
     "force_full_on_kb_query": True,
     # tool_loop_agent 最大步数（知识库检索通常 3~8 足够）
