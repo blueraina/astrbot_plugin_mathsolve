@@ -297,11 +297,10 @@ $$
 | `enable_plugin_kb_integration` | `false` | 启用插件知识库增强 |
 | `force_full_on_kb_query` | `true` | 知识库查询时输出完整图文回答 |
 | `kb_default_pick_count` | `2` | 默认返回知识库结果数量 |
-| `kb_insufficient_strategy` | `expand` | 知识库命中不足时的补位策略 |
 | `enable_chat_memory` | `true` | 启用短期对话记忆 |
 | `chat_memory_max_turns` | `120` | 每个会话最多保存问答对 |
 
-> `enable_plugin_kb_integration=false` 时，插件不会主动识别知识库/题库意图，也不会主动调用 `astr_kb_search`；知识库请求交给 AstrBot Agent 自身处理。
+> `enable_plugin_kb_integration=false` 时，插件不会主动识别知识库/题库意图；知识库请求交给 AstrBot Agent 自身处理。启用后插件只做意图识别和完整输出路由，不再维护独立的命中不足补位策略。
 
 ### 运行时高级项
 

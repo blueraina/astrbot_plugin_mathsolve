@@ -323,8 +323,8 @@
   },
   "pdf_guard": {
     "type": "object",
-    "description": "PDF 自检 / 修复",
-    "hint": "高级功能：让模型检查 LaTeX 编译错误或解答完整性。更稳，但会增加模型调用次数。",
+    "description": "高级：PDF 自检 / 修复",
+    "hint": "高级功能，默认可保持关闭；让模型检查 LaTeX 编译错误或解答完整性，更稳但会增加模型调用次数。",
     "items": {
       "spdf_disable_tools_during_generation": {
         "type": "bool",
@@ -428,8 +428,8 @@
   },
   "spdf_deepthink": {
     "type": "object",
-    "description": "SPDF DeepThink",
-    "hint": "控制 /spdf 多角色候选、Judge、质询、Python 验算、TikZ 预检和后处理。所有模型选择均为下拉框。",
+    "description": "实验：SPDF DeepThink",
+    "hint": "实验/高成本功能；控制 /spdf 多角色候选、Judge、质询、Python 验算、TikZ 预检和后处理。日常可先只用 /pdf。",
     "items": {
       "enable_spdf_output": {
         "type": "bool",
@@ -624,7 +624,7 @@
   "knowledge_memory": {
     "type": "object",
     "description": "知识库与对话记忆",
-    "hint": "插件知识库增强和短期对话记忆。插件知识库增强默认关闭；关闭时知识库调用交给 AstrBot Agent 自身处理。",
+    "hint": "插件知识库增强和短期对话记忆。知识库增强只做意图识别与 full 输出路由；具体检索交给 AstrBot Agent / astr_kb_search。",
     "items": {
       "enable_plugin_kb_integration": {
         "type": "bool",
@@ -640,28 +640,6 @@
         "hint": "仅在启用插件知识库增强时生效；用户询问知识库/题库类似题时，强制走完整回答格式",
         "obvious_hint": true
       },
-      "kb_agent_max_steps": {
-        "type": "int",
-        "description": "知识库工具 Agent 最大步数",
-        "default": 8,
-        "hint": "通常 3~8 足够",
-        "slider": {
-          "min": 1,
-          "max": 20,
-          "step": 1
-        }
-      },
-      "kb_tool_call_timeout_sec": {
-        "type": "int",
-        "description": "知识库工具单次调用超时（秒）",
-        "default": 60,
-        "hint": "知识库较慢时可调大",
-        "slider": {
-          "min": 5,
-          "max": 300,
-          "step": 5
-        }
-      },
       "kb_default_pick_count": {
         "type": "int",
         "description": "默认返回知识库结果数量",
@@ -672,74 +650,6 @@
           "max": 10,
           "step": 1
         }
-      },
-      "kb_insufficient_strategy": {
-        "type": "string",
-        "description": "知识库命中不足时的补位策略",
-        "default": "expand",
-        "hint": "none=不补；expand=扩大 query 继续检索；placeholder=占位说明；generate=外部生成并标注非知识库",
-        "options": [
-          "none",
-          "expand",
-          "placeholder",
-          "generate"
-        ],
-        "labels": [
-          "不补位",
-          "扩大检索（推荐）",
-          "占位说明",
-          "外部生成并标注"
-        ]
-      },
-      "kb_retry_rounds": {
-        "type": "int",
-        "description": "知识库检索重试轮数",
-        "default": 3,
-        "hint": "不同 query 候选 + 排除已选出处",
-        "slider": {
-          "min": 0,
-          "max": 10,
-          "step": 1
-        }
-      },
-      "kb_max_query_candidates": {
-        "type": "int",
-        "description": "每轮最多 query 候选数",
-        "default": 4,
-        "hint": "过大可能增加工具调用量",
-        "slider": {
-          "min": 1,
-          "max": 10,
-          "step": 1
-        }
-      },
-      "kb_fetch_multiplier": {
-        "type": "int",
-        "description": "检索候选数量倍率",
-        "default": 3,
-        "hint": "用于去重后仍能凑够结果",
-        "slider": {
-          "min": 1,
-          "max": 8,
-          "step": 1
-        }
-      },
-      "kb_generate_retry_rounds": {
-        "type": "int",
-        "description": "外部生成补位最大重试",
-        "default": 2,
-        "hint": "仅 kb_insufficient_strategy=generate 时使用",
-        "slider": {
-          "min": 0,
-          "max": 5,
-          "step": 1
-        }
-      },
-      "kb_external_source_label": {
-        "type": "string",
-        "description": "外部生成补位来源标识",
-        "default": "外部生成(非知识库)",
-        "hint": "避免把生成题冒充知识库命中"
       },
       "enable_chat_memory": {
         "type": "bool",
@@ -824,8 +734,8 @@
   },
   "runtime_advanced": {
     "type": "object",
-    "description": "运行时高级项",
-    "hint": "会话清理、追问复用图片、TeX 编译并发和缓存。一般保持默认即可。",
+    "description": "高级：运行时缓存 / 清理",
+    "hint": "高级运维项；会话清理、追问复用图片、TeX 编译并发和缓存。一般保持默认即可。",
     "items": {
       "session_ttl_sec": {
         "type": "int",
