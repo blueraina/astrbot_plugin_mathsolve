@@ -1,9 +1,5 @@
 # AstrBot 全学科答疑插件
 
-<p align="center">
-  <img src="logo.png" width="160" alt="AstrBot mathsolve logo">
-</p>
-
 > 当前版本：`v1.11.0`
 > 开源协议：`MIT License`
 
@@ -11,7 +7,7 @@
 
 > 外部联网搜索交给 AstrBot 自身的 Agent / 工具系统处理。本插件不再内置联网搜索关键词配置，只保留数学答疑、本地知识库、渲染和 PDF 生成相关能力。
 
-**插件交流群：** 1077289182
+
 
 ## 功能特性
 
