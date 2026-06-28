@@ -8,6 +8,7 @@ except ImportError:
 class PdfMixin:
     """PDF generation, provider fallback, and TeX compilation helpers."""
 
+    @staticmethod
     def _pdf_parse_timeout_value(value: Any, default: Optional[int] = None) -> Optional[int]:
         try:
             s = str(value if value is not None else "").strip()
@@ -444,6 +445,7 @@ class PdfMixin:
 
         return chain
 
+    @staticmethod
     def _pdf_prioritize_provider_chain(
             provider_chain: List[Dict[str, Any]],
             preferred_provider_id: str,
