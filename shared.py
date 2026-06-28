@@ -1464,6 +1464,38 @@ def _restore_math_tokens(html: str, pieces: List[str]) -> str:
     return out
 
 
+_INLINE_SVG_BLOCK_RE = re.compile(r"(?is)<svg\b[^>]*>[\s\S]*?</svg>")
+
+
+def _protect_inline_svg_blocks(md_text: str) -> Tuple[str, List[str]]:
+    """保护完整内联 SVG，避免 Markdown 解析器拆散 <text>/<path>/<line> 等子节点。"""
+    if not md_text:
+        return md_text, []
+
+    pieces: List[str] = []
+
+    def repl(m: re.Match) -> str:
+        pieces.append(m.group(0))
+        idx = len(pieces) - 1
+        return f'\n\n<div data-md2img-svg-placeholder="{idx}"></div>\n\n'
+
+    return _INLINE_SVG_BLOCK_RE.sub(repl, str(md_text)), pieces
+
+
+def _restore_inline_svg_blocks(html: str, pieces: List[str]) -> str:
+    if not pieces:
+        return html
+
+    out = html or ""
+    for i, svg in enumerate(pieces):
+        placeholder_re = re.compile(
+            rf"(?:<p>\s*)?<div\s+data-md2img-svg-placeholder=['\"]{i}['\"]\s*>\s*</div>(?:\s*</p>)?",
+            flags=re.I,
+        )
+        out = placeholder_re.sub(svg, out)
+    return out
+
+
 # -------------------------------------------------------------------------
 # /pdf：LaTeX 组装 + TeXLive.net 在线编译
 # -------------------------------------------------------------------------

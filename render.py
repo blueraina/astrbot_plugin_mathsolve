@@ -312,13 +312,15 @@ class RenderMixin:
 
         # --- 5. Markdown -> HTML ---
         md_text = _prepare_markdown_for_render(md_text)
-        protected_md, math_pieces = _protect_math_for_markdown(md_text)
+        protected_svg_md, svg_pieces = _protect_inline_svg_blocks(md_text)
+        protected_md, math_pieces = _protect_math_for_markdown(protected_svg_md)
 
         markdown_parser = mistune.create_markdown(
             escape=False, plugins=["table", "url", "strikethrough", "task_lists"]
         )
         html_content = markdown_parser(protected_md)
         html_content = _restore_math_tokens(html_content, math_pieces)
+        html_content = _restore_inline_svg_blocks(html_content, svg_pieces)
         html_content = html_content.replace("[problem-card]", '<span data-card="problem"></span>')
 
         full_html = html_template.format(css_content=base_css, content=html_content, mathjax_script_src=mathjax_script_src)
