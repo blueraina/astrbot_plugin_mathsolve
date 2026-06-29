@@ -192,6 +192,7 @@ class RenderMixin:
                 margin: 1.05em 0;
                 padding: 0.86em 1.05em;
                 border: 1px solid var(--gold);
+                border-left: 4px solid var(--gold);
                 border-radius: 7px;
                 background: linear-gradient(180deg, var(--gold-soft), #fff9e8);
                 box-shadow: inset 0 1px 0 rgba(255,255,255,0.65);
@@ -205,10 +206,12 @@ class RenderMixin:
             blockquote:nth-of-type(3n) {{
                 background: var(--blue-soft);
                 border-color: var(--blue);
+                border-left: 4px solid var(--blue);
             }}
             blockquote:has(> p:first-child [data-card="problem"]) {{
                 background: linear-gradient(180deg, #eef6ff, #f7fbff);
                 border-color: var(--blue);
+                border-left: 4px solid var(--blue);
                 text-align: left;
                 text-align-last: auto;
                 word-spacing: normal;
@@ -272,6 +275,14 @@ class RenderMixin:
             }}
             .MathJax_Display {{
                 margin: 0.95em 0 !important;
+            }}
+            .proof-end {{
+                text-align: right;
+                margin: 0.35em 0 0.1em;
+                line-height: 1.45;
+            }}
+            .proof-end .MathJax, .proof-end .MathJax_CHTML {{
+                display: inline-block !important;
             }}
 
             /* Paged.js 样式 */

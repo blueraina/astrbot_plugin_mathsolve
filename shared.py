@@ -1631,6 +1631,36 @@ def _normalize_inline_svg_markup(md_text: str) -> str:
     return re.sub(r"<svg\b([^>]*)>", repl, str(md_text), flags=re.I)
 
 
+_PROOF_END_MARKER_LINE_RE = re.compile(
+    r"^(?P<body>.*?)(?:\s*\\hfill)?\s*(?:\$\s*)?\\blacksquare\s*(?:\$)?\s*[。．.]*\s*$"
+)
+
+
+def _normalize_markdown_proof_end_marker(md_text: str) -> str:
+    """把模型偶发输出的裸证明结束标记转换为 MathJax 可渲染的右对齐块。"""
+    if not md_text or "\\blacksquare" not in md_text:
+        return md_text
+
+    out: List[str] = []
+    for line in str(md_text).splitlines():
+        if "proof-end" in line or "\\blacksquare" not in line:
+            out.append(line)
+            continue
+
+        m = _PROOF_END_MARKER_LINE_RE.match(line)
+        if not m:
+            out.append(line)
+            continue
+
+        body = (m.group("body") or "").rstrip()
+        if body:
+            out.append(body)
+            out.append("")
+        out.append('<div class="proof-end">$\\blacksquare$</div>')
+
+    return "\n".join(out).strip()
+
+
 def _prepare_markdown_for_render(md_text: str) -> str:
     """Markdown 渲染前的轻量规范化：结构化数学解答、还原 SVG、收窄 HTML。"""
     text = (md_text or "").strip()
@@ -1638,7 +1668,8 @@ def _prepare_markdown_for_render(md_text: str) -> str:
     text = _unwrap_svg_code_fences(text)
     text = _sanitize_inline_html_for_render(text)
     text = _normalize_inline_svg_markup(text)
-    return _auto_structure_math_note_markdown(text)
+    text = _auto_structure_math_note_markdown(text)
+    return _normalize_markdown_proof_end_marker(text)
 
 
 _KNOWN_XML_LIKE_TAGS = (
