@@ -732,6 +732,136 @@
       }
     }
   },
+  "daily_report": {
+    "type": "object",
+    "description": "每日答疑报告",
+    "hint": "按会话归档答疑记录，并在固定时间前自动整理为 LaTeX 讲义 PDF；也可用 /答疑报告生成 手动测试当前会话。",
+    "items": {
+      "enable_daily_report": {
+        "type": "bool",
+        "description": "启用每日答疑报告",
+        "default": false,
+        "hint": "开启后才会归档答疑记录；关闭时不会保存新的日报素材",
+        "obvious_hint": true
+      },
+      "daily_report_auto_send": {
+        "type": "bool",
+        "description": "自动发送每日答疑报告",
+        "default": false,
+        "hint": "开启后会在准备时间生成报告，到推送时间自动发送",
+        "obvious_hint": true
+      },
+      "daily_report_time": {
+        "type": "string",
+        "description": "每日推送时间",
+        "default": "23:30",
+        "hint": "24 小时制 HH:MM；例如 23:30"
+      },
+      "daily_report_prepare_ahead_minutes": {
+        "type": "int",
+        "description": "提前生成时间（分钟）",
+        "default": 120,
+        "hint": "例如推送时间 23:30、提前 120 分钟，则 21:30 开始整理并生成 PDF",
+        "slider": {
+          "min": 0,
+          "max": 360,
+          "step": 10
+        }
+      },
+      "daily_report_target_groups": {
+        "type": "text",
+        "description": "自动发送目标群/会话",
+        "default": "",
+        "hint": "可填群号、会话 origin 或每行一个目标；留空则对当天有记录的每个会话分别生成并发送"
+      },
+      "daily_report_provider_id": {
+        "type": "string",
+        "description": "日报整理模型",
+        "default": "",
+        "hint": "自动发送建议指定；手动命令留空时会使用当前会话模型",
+        "_special": "select_provider"
+      },
+      "daily_report_repair_provider_id": {
+        "type": "string",
+        "description": "LaTeX 修复模型",
+        "default": "",
+        "hint": "日报 PDF 编译失败时用于修复 TeX；留空则复用日报整理模型",
+        "_special": "select_provider"
+      },
+      "daily_report_timeout_sec": {
+        "type": "int",
+        "description": "日报模型调用超时（秒）",
+        "default": 300,
+        "hint": "整理记录可能较慢；0 表示不限制",
+        "slider": {
+          "min": 0,
+          "max": 1800,
+          "step": 30
+        }
+      },
+      "daily_report_max_rounds": {
+        "type": "int",
+        "description": "最多整理轮数",
+        "default": 4,
+        "hint": "记录较多时会先分段摘要，再最终整合",
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        }
+      },
+      "daily_report_min_records": {
+        "type": "int",
+        "description": "最少答疑记录数",
+        "default": 2,
+        "hint": "低于该数量时跳过生成，避免空报告",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "daily_report_max_records": {
+        "type": "int",
+        "description": "单份报告最多记录数",
+        "default": 80,
+        "hint": "0 表示不限制；记录过多会优先保留最近记录",
+        "slider": {
+          "min": 0,
+          "max": 300,
+          "step": 10
+        }
+      },
+      "daily_report_max_topics": {
+        "type": "int",
+        "description": "专题讲义最多专题数",
+        "default": 6,
+        "hint": "控制报告篇幅",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "daily_report_max_examples": {
+        "type": "int",
+        "description": "典型题精讲最多题数",
+        "default": 4,
+        "hint": "控制报告篇幅",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "daily_report_send_summary_text": {
+        "type": "bool",
+        "description": "自动发送时附带摘要文本",
+        "default": true,
+        "hint": "文件消息前附带统计区间和记录数量"
+      }
+    }
+  },
   "runtime_advanced": {
     "type": "object",
     "description": "高级：运行时缓存 / 清理",

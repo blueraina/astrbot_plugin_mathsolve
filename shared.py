@@ -395,6 +395,36 @@ DEFAULT_CFG: Dict[str, Any] = {
 "chat_memory_recency_half_life_sec": 21600,  # 6h
 # 是否把 /xxx 这类指令也写入记忆（通常没必要）
 "chat_memory_store_commands": False,
+
+# ========= 每日答疑报告 =========
+# 是否启用答疑记录归档与日报功能
+"enable_daily_report": False,
+# 是否自动在固定时间发送日报
+"daily_report_auto_send": False,
+# 自动推送时间；实际会提前 daily_report_prepare_ahead_minutes 开始生成
+"daily_report_time": "23:30",
+# 提前多少分钟开始整理记录和生成 PDF
+"daily_report_prepare_ahead_minutes": 120,
+# 自动日报目标群/会话；留空则对当天有记录的每个会话分别生成并发送
+"daily_report_target_groups": "",
+# 日报整理模型；手动命令留空时会跟随当前会话模型，自动发送建议配置
+"daily_report_provider_id": "",
+# 日报 LaTeX 修复模型；留空则复用日报整理模型
+"daily_report_repair_provider_id": "",
+# 单次日报模型调用超时
+"daily_report_timeout_sec": 300,
+# 最多分几轮扫描/整合记录
+"daily_report_max_rounds": 4,
+# 少于该条数时不生成报告
+"daily_report_min_records": 2,
+# 单份报告最多纳入多少条记录
+"daily_report_max_records": 80,
+# 专题讲义最多专题数
+"daily_report_max_topics": 6,
+# 典型题精讲最多题数
+"daily_report_max_examples": 4,
+# 自动发送时是否在文件消息前附带简短摘要
+"daily_report_send_summary_text": True,
 }
 
 

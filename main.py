@@ -12,12 +12,14 @@ try:
     from .spdf import SpdfMixin
     from .pdf import PdfMixin
     from .render import RenderMixin
+    from .daily_report import DailyReportMixin
 except ImportError:
     from shared import *
     from memory import MemoryMixin
     from spdf import SpdfMixin
     from pdf import PdfMixin
     from render import RenderMixin
+    from daily_report import DailyReportMixin
 
 
 # =============================================================================
@@ -366,9 +368,9 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.11.0",
+    "1.12.0",
 )
-class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
+class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
         self.config: Dict[str, Any] = dict(config) if isinstance(config, dict) else {}
@@ -377,6 +379,10 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
         self.IMAGE_CACHE_DIR = os.path.join(self.DATA_DIR, "md2img_cache")
         self.PDF_CACHE_DIR = os.path.join(self.DATA_DIR, "md2img_pdf_cache")
         self.TEXLIVE_CACHE_DIR = os.path.join(self.PDF_CACHE_DIR, "_texlive_cache")
+        self.DAILY_REPORT_DIR = os.path.join(self.DATA_DIR, "daily_reports")
+        self.DAILY_REPORT_RECORD_DIR = os.path.join(self.DAILY_REPORT_DIR, "records")
+        self.DAILY_REPORT_TEX_DIR = os.path.join(self.DAILY_REPORT_DIR, "tex")
+        self.DAILY_REPORT_OUTPUT_DIR = os.path.join(self.DAILY_REPORT_DIR, "reports")
 
         # Playwright 复用
         self._pw = None
@@ -393,6 +399,8 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
         # Session 清理任务
         self._session_cleaner_task: Optional[asyncio.Task] = None
         self._cache_cleaner_task: Optional[asyncio.Task] = None
+        self._daily_report_task: Optional[asyncio.Task] = None
+        self._daily_report_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()  # 最小侵入：统一保护 MATH_SESSION_STATE
 
         # TeXLive 编译日志
@@ -443,6 +451,7 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
             os.makedirs(self.IMAGE_CACHE_DIR, exist_ok=True)
             os.makedirs(self.PDF_CACHE_DIR, exist_ok=True)
             os.makedirs(self.TEXLIVE_CACHE_DIR, exist_ok=True)
+            self._daily_report_init_storage()
 
             if bool(self._cfg("auto_install_playwright_chromium", True)):
                 self._schedule_playwright_chromium_install("startup")
@@ -454,10 +463,17 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
             # 启动 session 清理任务
             self._start_session_cleaner()
             self._start_cache_cleaner()
+            self._start_daily_report_scheduler()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.11.0 - 本地编译版)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.12.0 - 本地编译版)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
+
+    async def terminate(self):
+        try:
+            self._stop_daily_report_scheduler()
+        except Exception:
+            pass
 
     def _schedule_playwright_chromium_install(self, reason: str = "") -> None:
         if not bool(self._cfg("auto_install_playwright_chromium", True)):
@@ -1281,6 +1297,18 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
                 "如仍有残留记忆，可尝试在 AstrBot 管理面板中手动删除该会话。"
             )
 
+    # === 快捷指令：手动生成当前会话答疑报告 ===
+    @filter.command("答疑报告生成")
+    async def cmd_daily_report_generate(self, event: AstrMessageEvent):
+        yield event.plain_result("正在整理当前会话的答疑记录并生成报告...")
+        try:
+            msg = await self._daily_report_handle_manual_command(event)
+        except Exception as e:
+            logger.error(f"手动答疑报告生成失败: {e}")
+            msg = "答疑报告生成失败：\n" + str(e)[:1200]
+        if msg:
+            yield event.plain_result(msg)
+
     # === 快捷指令 3: 生成 PDF 解答 ===
     @filter.command("pdf")
     async def cmd_pdf(self, event: AstrMessageEvent):
@@ -1526,6 +1554,16 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
                     st["last_pdf_msg_id"] = str(sent_msg_id)
             except Exception:
                 pass
+
+        await self._daily_report_record_answer(
+            event=event,
+            kind="pdf",
+            question=(final_text_input or ("[图片题目]" if final_image_inputs else "")),
+            answer="PDF 解答",
+            tex_src=generated_tex_src or "",
+            pdf_path=pdf_path,
+            image_urls=final_image_inputs,
+        )
 
     # === 快捷指令 4: DeepThink 多角色迭代生成 PDF 解答（/spdf） ===
     @filter.command("spdf")
@@ -1784,6 +1822,16 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
                     st["last_pdf_msg_id"] = str(sent_msg_id)
             except Exception:
                 pass
+
+        await self._daily_report_record_answer(
+            event=event,
+            kind="spdf",
+            question=(final_text_input or ("[图片题目]" if final_image_inputs else "")),
+            answer="SPDF DeepThink PDF 解答",
+            tex_src=generated_tex_src or "",
+            pdf_path=pdf_path,
+            image_urls=final_image_inputs,
+        )
 
     # ---------------------------------------------------------------------
     # 可选：路由模型辅助判断（只看文本）
@@ -2195,6 +2243,20 @@ class MarkdownConverterPlugin(MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Sta
                         })
             except Exception as e:
                 logger.warning(f"chat memory store(full) failed: {e}")
+            try:
+                pending = event.get_extra("_chatmem_pending")
+                if isinstance(pending, dict):
+                    await self._daily_report_record_answer(
+                        event=event,
+                        kind="full",
+                        question=str(pending.get("user") or ""),
+                        answer=resp.completion_text or raw,
+                        tex_src="",
+                        pdf_path="",
+                        image_urls=list(pending.get("user_images") or []),
+                    )
+            except Exception as e:
+                logger.warning(f"daily report store(full) failed: {e}")
             return
 
         if mode == "hint":
