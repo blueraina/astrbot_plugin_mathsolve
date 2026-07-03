@@ -11,14 +11,10 @@ class DailyReportMixin:
     """Daily Q&A archive and lecture-report generation."""
 
     _DAILY_REPORT_SECTION_TITLES = [
-        "今日概览",
         "今日知识地图",
         "专题讲义",
-        "串联型专题",
-        "并联型专题",
         "今日高频误区",
         "今日典型题精讲",
-        "今日结论卡片",
     ]
 
     _DAILY_REPORT_INTERNAL_DEFAULTS = {
@@ -411,7 +407,8 @@ class DailyReportMixin:
         return (
             "你是数学答疑记录整理员。请阅读下面一段答疑记录，提取可用于日报讲义的素材。\n"
             "输出要求：只输出简洁中文 Markdown，不要写 LaTeX 导言区，不要写代码块。\n"
-            "重点提取：核心知识点、题目之间的联系、可串联的专题、并列专题、常见误区、典型题。\n"
+            "不要使用 Markdown 加粗语法 **...**；小标题请用 ## 或 ###。\n"
+            "重点提取：核心知识点、题目之间的联系、可合并进专题讲义的脉络、常见误区、典型题和关键推导。\n"
             f"统计区间：{self._daily_report_display_time(start_ts)} 到 {self._daily_report_display_time(end_ts)}\n\n"
             + self._daily_report_records_to_prompt_text(records)
         )
@@ -422,11 +419,15 @@ class DailyReportMixin:
         titles = "\n".join(f"# {x}" for x in self._DAILY_REPORT_SECTION_TITLES)
         return (
             "你是大学数学答疑讲义编辑。请把今天的答疑记录整理成一份结构化小讲义。\n"
-            "风格：清晰、紧凑、有教学感；不是流水账。有关联的问题要串联讲，平行主题要并列比较。\n"
+            "风格：清晰、细致、有教学感；不是流水账。有关联的问题请自然合并到同一专题讲义中讲清楚。\n"
             "数学公式请用 $...$ 或 $$...$$，不要输出 LaTeX 导言区、\\documentclass、\\usepackage、tcolorbox 环境或危险命令。\n"
-            "不要加入“后续复习建议”，不要加入“原始答疑索引”。\n"
+            "不要使用 Markdown 加粗语法 **...**；需要强调时改用普通文字标签，例如“关键点：”“结论：”“易错点：”。\n"
+            "不要加入“今日概览”“串联型专题”“并联型专题”“今日结论卡片”“后续复习建议”或“原始答疑索引”。\n"
             f"专题讲义最多 {max_topics} 个，典型题最多 {max_examples} 个。\n"
-            "必须严格按下面 8 个一级标题输出，标题文字和顺序不要改：\n"
+            "专题讲义要比摘要更详细：每个专题至少包含核心结论、适用条件、关键推导或证明过程、易错点；可以使用行间公式展示关键步骤。\n"
+            "今日典型题精讲中，每道题必须以二级标题“## 典型题 n：题名”开头，并包含“题目：”“思路：”“详细过程：”“小结：”。\n"
+            "典型题的详细过程要展开关键计算或证明，不要只列结论；可以使用行间公式。\n"
+            "必须严格按下面 4 个一级标题输出，标题文字和顺序不要改：\n"
             f"{titles}\n\n"
             f"统计区间：{self._daily_report_display_time(start_ts)} 到 {self._daily_report_display_time(end_ts)}\n"
             f"记录数量：{record_count}\n\n"
@@ -476,7 +477,7 @@ class DailyReportMixin:
         matches = list(heading_re.finditer(text))
         sections = {title: "" for title in self._DAILY_REPORT_SECTION_TITLES}
         if not matches:
-            sections["今日概览"] = text.strip()
+            sections["专题讲义"] = text.strip()
             return sections
         for idx, m in enumerate(matches):
             title = m.group(1)
@@ -490,10 +491,40 @@ class DailyReportMixin:
         s = _ensure_balanced_dollar_math(s)
         return _escape_text_preserve_dollar_math(s)
 
+    def _daily_report_inline_markdown_to_latex(self, text: str) -> str:
+        s = _strip_known_xml_like_tags(str(text or ""))
+        s = _ensure_balanced_dollar_math(s)
+
+        def convert_plain(part: str) -> str:
+            result: List[str] = []
+            pos = 0
+            for m in re.finditer(r"\*\*(.+?)\*\*", part):
+                if m.start() > pos:
+                    result.append(_escape_latex_text_strict(part[pos:m.start()].replace("**", "")))
+                bold_text = m.group(1).strip()
+                if bold_text:
+                    result.append(r"\textbf{" + _escape_text_preserve_dollar_math(bold_text) + "}")
+                pos = m.end()
+            if pos < len(part):
+                result.append(_escape_latex_text_strict(part[pos:].replace("**", "")))
+            return "".join(result)
+
+        out_parts: List[str] = []
+        last = 0
+        for m in _MATH_DOLLAR_SEG.finditer(s):
+            if m.start() > last:
+                out_parts.append(convert_plain(s[last:m.start()]))
+            out_parts.append(m.group(1))
+            last = m.end()
+        if last < len(s):
+            out_parts.append(convert_plain(s[last:]))
+        return "".join(out_parts)
+
     def _daily_report_markdownish_to_latex(self, text: str) -> str:
         text = self._daily_report_strip_code_fence(text)
         out: List[str] = []
         list_mode = ""
+        math_block: Optional[List[str]] = None
 
         def close_list() -> None:
             nonlocal list_mode
@@ -503,15 +534,39 @@ class DailyReportMixin:
 
         for raw_line in str(text or "").splitlines():
             line = raw_line.rstrip()
+            stripped = line.strip()
+            if math_block is not None:
+                math_block.append(line)
+                if stripped.endswith("$$") or stripped.endswith(r"\]"):
+                    out.append("\n".join(math_block))
+                    math_block = None
+                continue
+
             if not line.strip():
                 close_list()
                 out.append(r"\par")
                 continue
 
+            if stripped in ("$$", r"\[") or (
+                (stripped.startswith("$$") and not (stripped.endswith("$$") and len(stripped) > 2))
+                or (stripped.startswith(r"\[") and not stripped.endswith(r"\]"))
+            ):
+                close_list()
+                math_block = [line]
+                continue
+
+            if (
+                (stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) > 2)
+                or (stripped.startswith(r"\[") and stripped.endswith(r"\]"))
+            ):
+                close_list()
+                out.append(line)
+                continue
+
             hm = re.match(r"^\s*#{2,4}\s+(.+?)\s*$", line)
             if hm:
                 close_list()
-                out.append(r"\subsection*{" + self._daily_report_tex_text(hm.group(1)) + "}")
+                out.append(r"\subsection*{" + self._daily_report_inline_markdown_to_latex(hm.group(1)) + "}")
                 continue
 
             bm = re.match(r"^\s*[-*+]\s+(.+?)\s*$", line)
@@ -523,21 +578,18 @@ class DailyReportMixin:
                     list_mode = target_mode
                     out.append(r"\begin{" + list_mode + r"}[leftmargin=1.8em,itemsep=0.2em]")
                 content = bm.group(1) if bm else nm.group(1)
-                out.append(r"\item " + self._daily_report_tex_text(content))
+                out.append(r"\item " + self._daily_report_inline_markdown_to_latex(content))
                 continue
 
             close_list()
-            out.append(self._daily_report_tex_text(line) + r"\par")
+            out.append(self._daily_report_inline_markdown_to_latex(line) + r"\par")
         close_list()
+        if math_block is not None:
+            out.append("\n".join(math_block))
         return "\n".join(out).strip() or "暂无可整理内容。"
 
     def _daily_report_fallback_markdown(self, records: List[Dict[str, Any]], start_ts: float, end_ts: float) -> str:
         lines: List[str] = []
-        lines.append("# 今日概览")
-        lines.append(
-            f"本报告整理了 {self._daily_report_display_time(start_ts)} 至 "
-            f"{self._daily_report_display_time(end_ts)} 的 {len(records)} 条答疑记录。"
-        )
         lines.append("# 今日知识地图")
         lines.append("- 本日问题以具体题目讲解为主。")
         lines.append("- 可按题目中出现的定义、定理、计算方法和证明结构继续整理。")
@@ -546,25 +598,41 @@ class DailyReportMixin:
             q = str(rec.get("question") or "[图片题目]").strip()
             lines.append(f"## 专题 {idx}")
             lines.append(q)
-        lines.append("# 串联型专题")
-        lines.append("今日记录数量有限，暂未识别出稳定的串联链条。")
-        lines.append("# 并联型专题")
-        lines.append("可将相近题型按定义、计算、证明三个维度并列比较。")
+            lines.append("关键点：请围绕题目条件、可用定理和证明目标继续展开。")
         lines.append("# 今日高频误区")
         lines.append("- 注意区分题目条件、结论目标和可调用定理。")
         lines.append("- 证明题中不要跳过关键映射或极限/连续性验证。")
         lines.append("# 今日典型题精讲")
         for idx, rec in enumerate(records[: self._daily_report_int_cfg("daily_report_max_examples", 4)], 1):
-            lines.append(f"## 典型题 {idx}")
+            lines.append(f"## 典型题 {idx}：答疑记录精选")
+            lines.append("题目：")
             lines.append(str(rec.get("question") or "[图片题目]").strip())
+            lines.append("思路：先识别题目条件和目标，再选择对应定义、定理或计算方法。")
+            lines.append("详细过程：")
             ans = str(rec.get("answer") or "").strip()
             if ans:
                 lines.append(ans)
-        lines.append("# 今日结论卡片")
-        lines.append("- 先把题目翻译成可调用的定义。")
-        lines.append("- 再选择对应定理或构造方法。")
-        lines.append("- 最后检查边界条件、符号和结论是否覆盖所有小问。")
+            lines.append("小结：检查边界条件、符号和结论是否覆盖所有小问。")
         return "\n".join(lines)
+
+    def _daily_report_split_example_cards(self, text: str) -> List[str]:
+        text = self._daily_report_strip_code_fence(text).strip()
+        if not text:
+            return []
+        heading_re = re.compile(r"(?m)^\s*#{2,4}\s+(?:典型题|例题|题目)\s*\d*[:：]?.*$")
+        matches = list(heading_re.finditer(text))
+        if not matches:
+            return [text]
+        cards: List[str] = []
+        prefix = text[:matches[0].start()].strip()
+        if prefix:
+            cards.append(prefix)
+        for idx, m in enumerate(matches):
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            card = text[m.start():end].strip()
+            if card:
+                cards.append(card)
+        return cards
 
     def _daily_report_build_tex(
         self,
@@ -576,23 +644,28 @@ class DailyReportMixin:
     ) -> str:
         sections = self._daily_report_extract_sections(markdown_text)
         colors = [
-            "reportBlue",
             "reportGreen",
             "reportPurple",
             "reportOrange",
-            "reportCyan",
             "reportRed",
-            "reportYellow",
-            "reportGray",
         ]
         body: List[str] = []
         for idx, sec_title in enumerate(self._DAILY_REPORT_SECTION_TITLES):
             color = colors[idx % len(colors)]
             body.append(r"\section*{" + self._daily_report_tex_text(sec_title) + "}")
             body.append(r"\addcontentsline{toc}{section}{" + self._daily_report_tex_text(sec_title) + "}")
-            body.append(r"\begin{dailyBox}{" + color + "}")
-            body.append(self._daily_report_markdownish_to_latex(sections.get(sec_title, "")))
-            body.append(r"\end{dailyBox}")
+            if sec_title == "今日典型题精讲":
+                cards = self._daily_report_split_example_cards(sections.get(sec_title, ""))
+                if not cards:
+                    cards = ["暂无可整理内容。"]
+                for card in cards:
+                    body.append(r"\begin{dailyBox}{" + color + "}")
+                    body.append(self._daily_report_markdownish_to_latex(card))
+                    body.append(r"\end{dailyBox}")
+            else:
+                body.append(r"\begin{dailyBox}{" + color + "}")
+                body.append(self._daily_report_markdownish_to_latex(sections.get(sec_title, "")))
+                body.append(r"\end{dailyBox}")
 
         return "\n".join([
             r"\documentclass[UTF8]{ctexart}",
