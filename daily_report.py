@@ -19,6 +19,7 @@ class DailyReportMixin:
 
     _DAILY_REPORT_INTERNAL_DEFAULTS = {
         "compile_max_rounds": 3,
+        "window_hours": 24,
         "record_retention_days": 7,
         "pdf_retention_days": 7,
         "failed_retention_days": 3,
@@ -95,6 +96,10 @@ class DailyReportMixin:
     def _daily_report_start_of_day_ts(ts: Optional[float] = None) -> float:
         dt = datetime.fromtimestamp(float(ts if ts is not None else time.time()))
         return dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+    def _daily_report_window_start_ts(self, end_ts: float) -> float:
+        hours = int(self._DAILY_REPORT_INTERNAL_DEFAULTS.get("window_hours", 24) or 24)
+        return max(0.0, float(end_ts) - max(1, hours) * 3600)
 
     @staticmethod
     def _daily_report_safe_filename(text: str, fallback: str = "daily_report") -> str:
@@ -425,6 +430,7 @@ class DailyReportMixin:
             "不要加入“今日概览”“串联型专题”“并联型专题”“今日结论卡片”“后续复习建议”或“原始答疑索引”。\n"
             f"专题讲义最多 {max_topics} 个，典型题最多 {max_examples} 个。\n"
             "专题讲义要比摘要更详细：每个专题至少包含核心结论、适用条件、关键推导或证明过程、易错点；可以使用行间公式展示关键步骤。\n"
+            "专题讲义中，每个专题必须以二级标题“## 专题 n：题名”开头；标题和“核心结论：”“关键推导：”等标签会由系统用 LaTeX 加粗。\n"
             "今日典型题精讲中，每道题必须以二级标题“## 典型题 n：题名”开头，并包含“题目：”“思路：”“详细过程：”“小结：”。\n"
             "典型题的详细过程要展开关键计算或证明，不要只列结论；可以使用行间公式。\n"
             "必须严格按下面 4 个一级标题输出，标题文字和顺序不要改：\n"
@@ -520,6 +526,34 @@ class DailyReportMixin:
             out_parts.append(convert_plain(s[last:]))
         return "".join(out_parts)
 
+    @staticmethod
+    def _daily_report_topic_label_line(text: str) -> bool:
+        s = str(text or "").strip()
+        return bool(re.match(r"^(?:专题|典型题|例题)\s*[一二三四五六七八九十百千万\d]+[、.．:：].+", s))
+
+    @staticmethod
+    def _daily_report_key_label_line(text: str) -> bool:
+        s = str(text or "").strip()
+        return bool(re.match(
+            r"^(?:核心结论|适用条件|关键推导|证明过程|计算过程|易错点|题目|思路|详细过程|小结|关键点|结论|方法|说明)[:：].*",
+            s,
+        ))
+
+    def _daily_report_label_line_to_latex(self, text: str) -> Optional[str]:
+        s = str(text or "").strip()
+        if self._daily_report_topic_label_line(s):
+            return r"\noindent\textbf{" + self._daily_report_inline_markdown_to_latex(s) + r"}\par"
+        if self._daily_report_key_label_line(s):
+            label, rest = re.split(r"[:：]", s, maxsplit=1)
+            return (
+                r"\noindent\textbf{"
+                + self._daily_report_tex_text(label.strip() + "：")
+                + "} "
+                + self._daily_report_inline_markdown_to_latex(rest.strip())
+                + r"\par"
+            )
+        return None
+
     def _daily_report_markdownish_to_latex(self, text: str) -> str:
         text = self._daily_report_strip_code_fence(text)
         out: List[str] = []
@@ -566,7 +600,13 @@ class DailyReportMixin:
             hm = re.match(r"^\s*#{2,4}\s+(.+?)\s*$", line)
             if hm:
                 close_list()
-                out.append(r"\subsection*{" + self._daily_report_inline_markdown_to_latex(hm.group(1)) + "}")
+                out.append(r"\subsection*{\textbf{" + self._daily_report_inline_markdown_to_latex(hm.group(1)) + "}}")
+                continue
+
+            label_line = self._daily_report_label_line_to_latex(line)
+            if label_line:
+                close_list()
+                out.append(label_line)
                 continue
 
             bm = re.match(r"^\s*[-*+]\s+(.+?)\s*$", line)
@@ -901,11 +941,7 @@ class DailyReportMixin:
         now_ts = time.time()
         origin = self._daily_report_origin_from_event(event)
         async with self._daily_report_lock:
-            state = self._daily_report_load_state()
-            cursors = state.get("manual_cursors")
-            if not isinstance(cursors, dict):
-                cursors = {}
-            start_ts = float(cursors.get(origin) or self._daily_report_start_of_day_ts(now_ts))
+            start_ts = self._daily_report_window_start_ts(now_ts)
             records = self._daily_report_load_records(start_ts, now_ts, origin)
             min_records = self._daily_report_int_cfg("daily_report_min_records", 2)
             if len(records) < min_records:
@@ -916,10 +952,6 @@ class DailyReportMixin:
             provider_id = await self._daily_report_resolve_provider_id(event=event)
             result = await self._daily_report_generate_report(records, start_ts, now_ts, event, provider_id, "manual")
             ok, msg = await self._daily_report_send_pdf_event(event, result, "manual")
-            if ok:
-                cursors[origin] = now_ts
-                state["manual_cursors"] = cursors
-                self._daily_report_save_state(state)
             return msg
 
     def _daily_report_parse_schedule(self, now_ts: Optional[float] = None) -> Tuple[str, float, float]:
@@ -979,7 +1011,7 @@ class DailyReportMixin:
                     self._daily_report_save_state(state)
 
     async def _daily_report_prepare_auto_reports(self, state: Dict[str, Any], send_key: str, end_ts: float) -> None:
-        start_ts = float(state.get("auto_cursor_ts") or (float(end_ts) - 86400))
+        start_ts = self._daily_report_window_start_ts(end_ts)
         all_records = self._daily_report_load_records(start_ts, end_ts)
         origins = self._daily_report_resolve_auto_origins(all_records)
         pending_all = state.get("pending_auto_reports")
@@ -1004,7 +1036,6 @@ class DailyReportMixin:
         pending_all[send_key] = day_pending
         state["pending_auto_reports"] = pending_all
         state["last_auto_prepare_key"] = send_key
-        state["auto_cursor_ts"] = end_ts
         self._daily_report_cleanup_old_files()
 
     async def _daily_report_send_pending_auto_reports(self, state: Dict[str, Any], send_key: str) -> bool:
