@@ -368,7 +368,7 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.13.3",
+    "1.13.2",
 )
 class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -465,7 +465,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             self._start_cache_cleaner()
             self._start_daily_report_scheduler()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.13.3 - 本地编译版)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.13.2 - 本地编译版)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
@@ -1578,7 +1578,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if m:
             arg = (m.group(1) or "").strip()
 
-        current_images = await self._pdf_get_event_image_inputs(event)
+        current_images = _get_event_images(event)
         skey = _get_session_key(event)
 
         async with self._state_lock:
@@ -1906,7 +1906,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 self.context.activate_llm_tool("astr_kb_search")
             except Exception:
                 pass
-        current_images = await self._pdf_get_event_image_inputs(event)
+        current_images = _get_event_images(event)
         reply_id = self._extract_reply_msg_id(event)
         is_private = self._is_private_chat(event)
 
@@ -1947,19 +1947,6 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                         effective_images = list(cached)
                         used_pending_image = True
 
-            # 某些适配器只能给出 reply_id，无法稳定对应到原图片 message_id。
-            # 若用户明确引用/回复且最近一题确实是图片题，则退回使用最近缓存图，避免插件接管后丢图。
-            if (not effective_images) and user_text and reply_id and state.get("last_had_img"):
-                try:
-                    last_ts = float(state.get("last_image_ts", 0) or 0)
-                except Exception:
-                    last_ts = 0.0
-                if last_ts and (now_ts - last_ts <= 15 * 60):
-                    cached = state.get("last_image_urls") or []
-                    if isinstance(cached, list) and cached:
-                        effective_images = list(cached)
-                        used_pending_image = True
-
             if used_pending_image:
                 # 用过就清掉 pending，避免后续串图；image_ctx_map 保留以支持再次精确引用。
                 state.pop("pending_image_only", None)
@@ -1970,6 +1957,8 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             state_snapshot = dict(state)
 
         state = state_snapshot
+        if used_pending_image:
+            self._attach_images_to_req(req, effective_images, replace_existing=True)
 
         # 后续逻辑统一使用 current_images（可能来自 pending）
         current_images = effective_images
@@ -2073,11 +2062,6 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         is_followup_full = (not is_math) and wants_full and (last_problem or last_had_img)
         if not (is_math or is_followup_full):
             return
-
-        # 只要插件接管数学答疑，就主动把图片写回 ProviderRequest。
-        # 当前消息带图时合并保留原请求图片；引用/缓存图则覆盖空缺，避免改写 prompt 后视觉输入丢失。
-        if current_images:
-            self._attach_images_to_req(req, current_images, replace_existing=used_pending_image)
 
         # 记录“上一题”
         if is_math:
