@@ -368,7 +368,7 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.13.2",
+    "1.13.4",
 )
 class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -465,7 +465,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             self._start_cache_cleaner()
             self._start_daily_report_scheduler()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.13.2 - 本地编译版)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.13.4 - 本地编译版)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 

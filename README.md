@@ -1,6 +1,6 @@
 # AstrBot 全学科答疑插件
 
-> 当前版本：`v1.13.2`
+> 当前版本：`v1.13.4`
 > 开源协议：`MIT License`
 
 一个面向 AstrBot 的数学与全学科答疑插件，主要提供 Markdown 转图片、数学图文讲义、LaTeX PDF 解答、可选知识库增强和短期对话记忆等能力。
@@ -372,6 +372,20 @@ python -m playwright install chromium
 - 减少单次输出内容长度
 
 如果日志出现 `local MathJax not found` 或 `local PagedJS not found`，说明当前安装目录缺少 `vendor/md2img/`，建议重新拉取最新仓库或重新安装插件。
+
+### Docker / Linux 中文显示为方块
+
+Markdown 转图片由 Playwright / Chromium 渲染。若 Docker 或 Linux 环境生成图片时中文显示为方块，通常是 AstrBot 实际运行环境缺少中文字体。
+
+在 Debian / Ubuntu 系容器或服务器中可安装：
+
+```bash
+apt update
+apt install -y --no-install-recommends fontconfig fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei
+fc-cache -rfv
+```
+
+如果 AstrBot 跑在 Docker 中，只在宿主机安装字体通常无效；需要在容器内安装，或把宿主机字体目录挂载进容器并刷新 `fontconfig` 缓存。
 
 ### `/pdf` 或 `/spdf` 提示找不到 xelatex
 

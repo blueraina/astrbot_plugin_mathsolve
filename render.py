@@ -98,6 +98,12 @@ class RenderMixin:
             font_size = "17px"
             is_mobile_css = True
 
+        font_family = (
+            '"Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", '
+            '"Source Han Sans SC", "WenQuanYi Micro Hei", "WenQuanYi Zen Hei", '
+            '"PingFang SC", "SimHei", sans-serif'
+        )
+
         # --- 2. CSS 样式：数学讲义风（米白纸张 + 棕色标题 + 讲义卡片） ---
         base_css = f"""
             * {{ box-sizing: border-box; }}
@@ -119,7 +125,7 @@ class RenderMixin:
             body {{
                 margin: 0; padding: 0;
                 background: #ffffff;
-                font-family: "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "SimHei", sans-serif;
+                font-family: {font_family};
             }}
             .content-wrapper {{
                 background-color: var(--paper);
@@ -142,11 +148,11 @@ class RenderMixin:
                 border-radius: 7px;
             }}
             svg text {{
-                font-family: "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "SimHei", sans-serif;
+                font-family: {font_family};
             }}
             h1, h2, h3, h4 {{
                 color: var(--brown-deep);
-                font-family: "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "SimHei", sans-serif;
+                font-family: {font_family};
                 font-weight: 800;
                 letter-spacing: 0.02em;
             }}
