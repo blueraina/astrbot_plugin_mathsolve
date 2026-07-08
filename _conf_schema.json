@@ -114,6 +114,40 @@
           "commit（最快）"
         ]
       },
+      "night_mode": {
+        "type": "string",
+        "description": "图片夜间模式",
+        "default": "off",
+        "hint": "深色背景图片，适合暗光环境；auto 按下方时间区间自动切换",
+        "options": [
+          "off",
+          "auto",
+          "on"
+        ],
+        "labels": [
+          "关闭（始终浅色）",
+          "按时间自动切换",
+          "开启（始终深色）"
+        ]
+      },
+      "night_mode_start": {
+        "type": "string",
+        "description": "夜间模式开始时间",
+        "default": "22:00",
+        "hint": "24 小时制 HH:MM；仅在夜间模式为 auto 时生效，支持跨零点区间"
+      },
+      "night_mode_end": {
+        "type": "string",
+        "description": "夜间模式结束时间",
+        "default": "07:00",
+        "hint": "24 小时制 HH:MM；仅在夜间模式为 auto 时生效"
+      },
+      "pagedjs_enabled": {
+        "type": "bool",
+        "description": "启用 PC 长内容 PagedJS 分页",
+        "default": true,
+        "hint": "关闭后 PC 模式长内容不再分页，直接输出一张长图；分页反复失败时可关闭"
+      },
       "pagedjs_wait_timeout_sec": {
         "type": "int",
         "description": "PC 分页等待 PagedJS 超时（秒）",

@@ -8,6 +8,35 @@ except ImportError:
 class RenderMixin:
     """Markdown, MathJax, PagedJS, and screenshot rendering helpers."""
 
+    def _night_mode_active(self) -> bool:
+        """夜间模式是否生效：off=否；on=是；auto=按本地时间区间判断（支持跨零点）。"""
+        mode = str(self._cfg("night_mode", "off") or "off").strip().lower()
+        if mode == "on":
+            return True
+        if mode != "auto":
+            return False
+
+        def _parse_hhmm(val, default_minutes):
+            try:
+                h, m = str(val).strip().split(":")
+                h, m = int(h), int(m)
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return h * 60 + m
+            except Exception:
+                pass
+            return default_minutes
+
+        start = _parse_hhmm(self._cfg("night_mode_start", "22:00"), 22 * 60)
+        end = _parse_hhmm(self._cfg("night_mode_end", "07:00"), 7 * 60)
+        now = datetime.now()
+        cur = now.hour * 60 + now.minute
+        if start == end:
+            return False
+        if start < end:
+            return start <= cur < end
+        # 跨零点：如 22:00 ~ 07:00
+        return cur >= start or cur < end
+
     async def _process_text_with_markdown(self, text: str, event: AstrMessageEvent = None) -> List[Any]:
         if "<md>" not in text:
             is_complex = re.search(r"(```|\$\$|\|.*?\|.*?\||\\begin\{)", text, re.DOTALL)
@@ -204,12 +233,14 @@ class RenderMixin:
                 box-shadow: inset 0 1px 0 rgba(255,255,255,0.65);
                 page-break-inside: avoid;
             }}
-            blockquote:nth-of-type(3n + 2) {{
+            /* 三色轮换 class 由模板内脚本按 nth-of-type 语义打上；
+               不能直接用 :nth-of-type(3n+2)，An+B 选择器会让 PagedJS 的 CSS 解析崩溃 */
+            blockquote.bq-cycle-2 {{
                 background: var(--green-soft);
                 border-color: var(--green);
                 border-left: 4px solid var(--green);
             }}
-            blockquote:nth-of-type(3n) {{
+            blockquote.bq-cycle-0 {{
                 background: var(--blue-soft);
                 border-color: var(--blue);
                 border-left: 4px solid var(--blue);
@@ -297,6 +328,55 @@ class RenderMixin:
             .pagedjs_margin-top, .pagedjs_margin-bottom {{ display: none; }}
         """
 
+        # --- 2.5 夜间模式：暗色配色覆盖（只换颜色，不动排版/分页） ---
+        if self._night_mode_active():
+            base_css += """
+            :root {
+                --paper: #1e2126;
+                --paper-soft: #22262c;
+                --ink: #e6e2d8;
+                --muted: #a8b0ba;
+                --brown: #d9a55e;
+                --brown-deep: #e3b877;
+                --gold: #8a6d2f;
+                --gold-soft: #383021;
+                --green: #6f9c55;
+                --green-soft: #26301f;
+                --blue: #5f8fc4;
+                --blue-soft: #20293a;
+                --line: #5a4a26;
+            }
+            body { background: #1e2126; }
+            h1 { border-bottom-color: #a97f3a; }
+            h2 { border-left-color: #a97f3a; }
+            hr { border-top-color: #a97f3a; }
+            strong { color: #f0ead9; }
+            /* SVG 示意图保持浅色底，保证线条/标注可读 */
+            svg { background: rgba(255,255,255,0.92); }
+            blockquote {
+                background: linear-gradient(180deg, var(--gold-soft), #322c1e);
+                box-shadow: none;
+            }
+            blockquote.bq-cycle-2 { background: var(--green-soft); }
+            blockquote.bq-cycle-0 { background: var(--blue-soft); }
+            blockquote:has(> p:first-child [data-card="problem"]) {
+                background: linear-gradient(180deg, #20293a, #1d2431);
+            }
+            pre {
+                background-color: #262a31;
+                color: #dcd6c8;
+                border-color: #4a4433;
+            }
+            code {
+                background: #2e3138;
+                border-color: #4a4433;
+                color: #e2ddcf;
+            }
+            table { background: rgba(255,255,255,0.04); }
+            th, td { border-color: #5a4a26; }
+            th { background: #2e2a1f; color: var(--brown-deep); }
+        """
+
         # --- 4. HTML 模板 ---
         mathjax_local_js = _plugin_resource_path("vendor", "md2img", "mathjax-2.7.7", "MathJax.js")
         if os.path.exists(mathjax_local_js):
@@ -313,6 +393,7 @@ class RenderMixin:
             <style>{css_content}</style>
             <script type="text/x-mathjax-config">
                 MathJax.Hub.Config({{
+                    skipStartupTypeset: true,
                     tex2jax: {{ inlineMath: [['$','$']], displayMath: [['$$','$$']], processEscapes: true }},
                     "HTML-CSS": {{ scale: 90, linebreaks: {{ automatic: true, width: "container" }} }},
                     SVG: {{ linebreaks: {{ automatic: true, width: "container" }} }}
@@ -323,6 +404,19 @@ class RenderMixin:
         </head>
         <body>
             <div class="content-wrapper" id="main-content">{content}</div>
+            <script>
+            (function() {{
+                var bqs = document.querySelectorAll("blockquote");
+                for (var i = 0; i < bqs.length; i++) {{
+                    var n = 1, el = bqs[i];
+                    while ((el = el.previousElementSibling)) {{
+                        if (el.tagName === "BLOCKQUOTE") n++;
+                    }}
+                    if (n % 3 === 2) bqs[i].classList.add("bq-cycle-2");
+                    else if (n % 3 === 0) bqs[i].classList.add("bq-cycle-0");
+                }}
+            }})();
+            </script>
         </body>
         </html>
         """
@@ -374,6 +468,19 @@ class RenderMixin:
             device_scale_factor=scale, viewport={"width": vp_width, "height": 2000}
         )
         page = await context.new_page()
+
+        def _on_page_error(err):
+            logger.warning(f"[md2img] browser pageerror: {err}")
+
+        def _on_console(msg):
+            try:
+                if msg.type in ("error", "warning"):
+                    logger.warning(f"[md2img] browser console.{msg.type}: {msg.text}")
+            except Exception:
+                pass
+
+        page.on("pageerror", _on_page_error)
+        page.on("console", _on_console)
         render_html_path = ""
 
         try:
@@ -464,11 +571,10 @@ class RenderMixin:
                 logger.error(f"Render fallback restore original content failed: {e}")
             await _full_page_screenshot(reason or "restore original content failed")
 
-        # 等待 MathJax 加载并完成排版
-        await _typeset_mathjax()
-        await page.wait_for_timeout(5000)
         # === Mobile: 长截屏 ===
         if is_mobile_css:
+            await _typeset_mathjax()
+            await page.wait_for_timeout(5000)
             element = await page.query_selector(".content-wrapper")
             if element:
                 await element.screenshot(path=output_image_path)
@@ -477,14 +583,18 @@ class RenderMixin:
                 await _fallback_content_screenshot("content-wrapper not found")
         else:
             # === PC: 智能分页检测 ===
+            # 用原始（未排版公式）内容高度估算是否需要分页
             try:
                 content_height = await page.evaluate("document.getElementById('main-content').scrollHeight")
             except Exception:
                 content_height = 0
 
             A4_HEIGHT = 1123
+            pagedjs_enabled = bool(self._cfg("pagedjs_enabled", True))
 
-            if content_height <= A4_HEIGHT:
+            if content_height <= A4_HEIGHT or not pagedjs_enabled:
+                await _typeset_mathjax()
+                await page.wait_for_timeout(5000)
                 element = await page.query_selector(".content-wrapper")
                 if element:
                     await element.screenshot(path=output_image_path)
@@ -492,6 +602,9 @@ class RenderMixin:
                 else:
                     await _fallback_content_screenshot("content-wrapper not found")
             else:
+                # 先让 PagedJS 在原始（未排版公式）DOM 上分页，
+                # 分页完成后再对分页结果执行 MathJax 排版，
+                # 避免 PagedJS 处理 MathJax 生成的复杂 DOM 时卡死。
                 paged_style = """
                     @page { size: 794px 1123px; margin: 45px; }
                     .pagedjs_page { box-sizing: border-box; }
@@ -524,6 +637,7 @@ class RenderMixin:
 
                 if pagedjs_ready:
                     await _typeset_mathjax("after pagedjs")
+                    await page.wait_for_timeout(3000)
 
                     pages = await page.query_selector_all(".pagedjs_page")
                     base_path, ext = os.path.splitext(output_image_path)
