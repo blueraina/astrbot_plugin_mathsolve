@@ -555,9 +555,19 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
     # === 全局消息监听：记录用户最后发的图片 & 活跃时间 ===
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
+        ingest_token = ""
+        skey = ""
         try:
-            imgs = await self._pdf_get_event_image_inputs(event)
             skey = _get_session_key(event)
+            # --- 快速预标记：图片快照（下载/转码）可能耗时数秒，先在状态里登记
+            # “有新图正在入库”，避免紧跟着的 /pdf 读到旧的 last_image_urls（跨题串图）。
+            if self._event_has_image(event):
+                ingest_token = uuid.uuid4().hex
+                async with self._state_lock:
+                    st0 = MATH_SESSION_STATE.setdefault(skey, {})
+                    st0["image_ingest_pending_ts"] = time.time()
+                    st0["image_ingest_pending_token"] = ingest_token
+            imgs = await self._pdf_get_event_image_inputs(event)
             now_ts = time.time()
             raw = (getattr(event, "message_str", "") or "").strip()
 
@@ -622,7 +632,53 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                     pass
         except Exception:
             pass
+        finally:
+            # 清除“图片入库中”标记（仅当仍是本消息打的标；期间来了更新的图则不动它）
+            if ingest_token and skey:
+                try:
+                    async with self._state_lock:
+                        st1 = MATH_SESSION_STATE.get(skey)
+                        if st1 is not None and st1.get("image_ingest_pending_token") == ingest_token:
+                            st1.pop("image_ingest_pending_ts", None)
+                            st1.pop("image_ingest_pending_token", None)
+                except Exception:
+                    pass
 
+
+    def _event_has_image(self, event: AstrMessageEvent) -> bool:
+        """轻量判断消息里是否带图片组件（不做任何下载/转码）。"""
+        try:
+            for comp in (getattr(getattr(event, "message_obj", None), "message", None) or []):
+                if isinstance(comp, Image) or comp.__class__.__name__.lower() == "image":
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _wait_image_ingest_settled(self, skey: str, state: Dict[str, Any],
+                                         max_wait_sec: float = 20.0) -> Dict[str, Any]:
+        """若该会话有图片消息正在入库（快照下载中），等它写完状态后重读，返回最新 state。
+
+        用于 /pdf、/spdf：用户常常“先发图、紧接着发命令”，图片快照可能耗时数秒，
+        不等待的话命令会读到旧的 last_image_urls，把上一题的图拿去解答。
+        """
+        deadline = time.time() + max(0.0, float(max_wait_sec))
+        waited = False
+        while True:
+            ts = float(state.get("image_ingest_pending_ts", 0) or 0)
+            # 无入库中标记，或标记已僵死（超过快照超时上限很多，视为异常残留）
+            if (not ts) or (time.time() - ts) > 60:
+                break
+            if time.time() >= deadline:
+                logger.warning("等待图片入库超时，将使用当前会话状态继续")
+                break
+            waited = True
+            await asyncio.sleep(0.3)
+            async with self._state_lock:
+                state = MATH_SESSION_STATE.get(skey, {}).copy()
+        if waited:
+            logger.info("检测到图片正在入库，已等待其完成后再选取图片")
+        return state
 
     # ------------------------- Reply/引用消息识别（用于 PDF 二次追问） -------------------------
     def _extract_reply_msg_id(self, event: AstrMessageEvent) -> Optional[str]:
@@ -1328,6 +1384,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         async with self._state_lock:
             state = MATH_SESSION_STATE.get(skey, {}).copy()
 
+        # 本条命令没带图时，若有刚发的图片正在入库（快照下载中），等它写完再取，
+        # 避免拿到上一题的旧图。
+        if not current_images:
+            state = await self._wait_image_ingest_settled(skey, state)
+
         last_problem_text = (state.get("last_problem", "") or "").strip()
         last_images = state.get("last_image_urls", [])
         last_image_ts = float(state.get("last_image_ts", 0) or 0)
@@ -1583,6 +1644,10 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         async with self._state_lock:
             state = MATH_SESSION_STATE.get(skey, {}).copy()
+
+        # 同 /pdf：命令没带图时等待正在入库的新图，避免拿到上一题的旧图
+        if not current_images:
+            state = await self._wait_image_ingest_settled(skey, state)
 
         last_problem_text = (state.get("last_problem", "") or "").strip()
         last_images = state.get("last_image_urls", [])
