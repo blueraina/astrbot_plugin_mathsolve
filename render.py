@@ -356,8 +356,14 @@ class RenderMixin:
             h2 { border-left-color: #a97f3a; }
             hr { border-top-color: #a97f3a; }
             strong { color: #f0ead9; }
-            /* SVG 示意图保持浅色底，保证线条/标注可读 */
-            svg { background: rgba(255,255,255,0.92); }
+            /* SVG 示意图暗色化：白底 + 整体反色/色相旋转。
+               模型画的线条/文字多为深色且颜色写死在属性里，无法逐一覆盖；
+               反色后白底变深底、深色线条变浅色，彩色曲线色相基本保持。 */
+            svg {
+                background: #fff;
+                filter: invert(0.90) hue-rotate(180deg);
+                border-radius: 6px;
+            }
             blockquote {
                 background: linear-gradient(180deg, var(--gold-soft), #322c1e);
                 box-shadow: none;
