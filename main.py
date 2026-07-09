@@ -2104,6 +2104,8 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 "图文讲义要求：当题目涉及几何图形、函数图像、积分区域、向量、空间立体、坐标变换或结构关系时，"
                 "请在相关小节直接写一个内联 SVG 示意图，例如 `<svg width=\"720\" height=\"320\" viewBox=\"0 0 720 320\">...</svg>`。\n"
                 "SVG 只画辅助理解所需的坐标轴、边界、阴影区域、箭头、标签和关键点；不要声称示意图精确到未给出的数值。\n"
+                "SVG 里的 `<text>` 标签内容可以直接写行内公式，如 `<text x=\"400\" y=\"40\" text-anchor=\"middle\">$y=x^2$</text>`，渲染时会自动排版；"
+                "但一个 `<text>` 只写一行，别在里面用多个带坐标的 tspan 混排公式。\n"
                 "不要输出 Python 绘图代码，不要输出外链图片，不要把 SVG 放进代码块；SVG 会和 Markdown/LaTeX 一起被渲染成图片。\n"
             )
 

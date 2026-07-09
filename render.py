@@ -322,6 +322,11 @@ class RenderMixin:
                 display: inline-block !important;
             }}
 
+            /* SVG 内公式标签（由模板脚本从 <text> 转换而来） */
+            svg foreignObject.svg-math-host {{ overflow: visible; }}
+            .svg-math-label {{ font-family: inherit; }}
+            .svg-math-label .MathJax {{ display: inline !important; }}
+
             /* Paged.js 样式 */
             .pagedjs_pages .content-wrapper {{ width: auto !important; padding: 0 !important; }}
             .pagedjs_page {{ background-color: var(--paper) !important; box-shadow: none !important; overflow: hidden; }}
@@ -414,6 +419,53 @@ class RenderMixin:
                     }}
                     if (n % 3 === 2) bqs[i].classList.add("bq-cycle-2");
                     else if (n % 3 === 0) bqs[i].classList.add("bq-cycle-0");
+                }}
+            }})();
+            // SVG 内数学公式：把含 $...$ 的 <text> 转成 foreignObject HTML，
+            // 使 MathJax 能对其排版（MathJax 不处理 SVG <text> 节点）。
+            (function() {{
+                var svgs = document.querySelectorAll("#main-content svg");
+                for (var s = 0; s < svgs.length; s++) {{
+                    var svg = svgs[s];
+                    var texts = svg.querySelectorAll("text");
+                    var host = null;
+                    for (var i = 0; i < texts.length; i++) {{
+                        var t = texts[i];
+                        var raw = t.textContent || "";
+                        if (raw.indexOf("$") === -1) continue;
+                        // 多个自带定位的 tspan（多行标签）不好映射，跳过保持原样
+                        var posTspans = t.querySelectorAll("tspan[x], tspan[y]");
+                        if (posTspans.length > 1) continue;
+                        var x = parseFloat(t.getAttribute("x") || "0") || 0;
+                        var y = parseFloat(t.getAttribute("y") || "0") || 0;
+                        var cs = window.getComputedStyle(t);
+                        var fs = parseFloat(t.getAttribute("font-size") || "") || parseFloat(cs.fontSize) || 15;
+                        var anchor = (t.getAttribute("text-anchor") || cs.textAnchor || "start");
+                        var fill = t.getAttribute("fill") || cs.fill || "#333";
+                        if (!host) {{
+                            host = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+                            host.setAttribute("x", "0");
+                            host.setAttribute("y", "0");
+                            host.setAttribute("width", "100%");
+                            host.setAttribute("height", "100%");
+                            host.setAttribute("class", "svg-math-host");
+                            var wrap = document.createElement("div");
+                            wrap.setAttribute("style", "position:relative;width:100%;height:100%;pointer-events:none;");
+                            host.appendChild(wrap);
+                            svg.appendChild(host);
+                        }}
+                        var tx = anchor === "middle" ? "-50%" : (anchor === "end" ? "-100%" : "0");
+                        var div = document.createElement("div");
+                        div.className = "svg-math-label";
+                        div.setAttribute("style",
+                            "position:absolute;left:" + x + "px;top:" + (y - 0.35 * fs) + "px;" +
+                            "transform:translate(" + tx + ",-50%);" +
+                            "color:" + fill + ";font-size:" + fs + "px;" +
+                            "white-space:nowrap;line-height:1.2;");
+                        div.textContent = raw;
+                        host.firstChild.appendChild(div);
+                        t.parentNode.removeChild(t);
+                    }}
                 }}
             }})();
             </script>

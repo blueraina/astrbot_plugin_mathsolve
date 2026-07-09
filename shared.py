@@ -1127,7 +1127,8 @@ def _restore_inline_svg_blocks(html: str, pieces: List[str]) -> str:
             rf"(?:<p>\s*)?<div\s+data-md2img-svg-placeholder=['\"]{i}['\"]\s*>\s*</div>(?:\s*</p>)?",
             flags=re.I,
         )
-        out = placeholder_re.sub(svg, out)
+        # svg 作为字面量替换（lambda 绕过 re.sub 的 \、\g<> 转义解析，公式里的 \int 等会触发 bad escape）
+        out = placeholder_re.sub(lambda m, s=svg: s, out)
     return out
 
 
