@@ -1132,37 +1132,17 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         )
 
     def _pdf_file_send_failure_message(self, pdf_path: str, fname: str, err: Any, label: str = "PDF") -> str:
-        resolved, exists, size = self._pdf_local_file_info(pdf_path)
-        callback_api_base = self._astrbot_callback_api_base()
+        """生成可安全发到聊天中的提示；完整诊断仅写入插件日志。"""
+        _resolved, exists, _size = self._pdf_local_file_info(pdf_path)
         if not exists:
             return (
-                f"❌ {label} 已生成流程结束，但本地文件不存在，无法发送。\n"
-                f"文件名：{fname}\n"
-                f"路径：{resolved}\n"
-                "请查看插件日志里的 PDF 生成/缓存目录错误。"
+                f"❌ {label} 已生成，但未找到待发送文件。\n"
+                "请联系管理员查看 AstrBot 插件日志。"
             )
 
-        if callback_api_base:
-            hint = (
-                f"已检测到 callback_api_base：{callback_api_base}\n"
-                "请确认 NapCat/OneBot 协议端能访问这个地址；如果 AstrBot 在容器里，也要确认端口已对外暴露。"
-            )
-        else:
-            hint = (
-                "当前 AstrBot 的 callback_api_base 为空，AstrBot 会把本地文件路径直接交给 NapCat/OneBot。\n"
-                "如果协议端和 AstrBot 不在同一个文件系统/容器里，就会出现 ENOENT。"
-            )
-
-        err_text = self._short_error_text(err, 500)
         return (
-            f"⚠️ {label} 已生成，但发送文件失败。\n"
-            f"文件名：{fname}\n"
-            f"大小：{size} bytes\n"
-            f"服务器路径：{resolved}\n\n"
-            f"{hint}\n\n"
-            "处理方式：在 AstrBot WebUI 配置可被协议端访问的 callback_api_base，"
-            "或让协议端容器/进程挂载并能读取同一个 plugins_data 路径。"
-            + (f"\n\n错误：{err_text}" if err_text else "")
+            f"⚠️ {label} 已生成，但发送失败。\n"
+            "请稍后重试；若持续失败，请联系管理员查看 AstrBot 与 NapCat/OneBot 日志。"
         )
 
     async def _send_pdf_file_component(
