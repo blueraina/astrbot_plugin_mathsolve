@@ -173,6 +173,13 @@
         "hint": "关闭后 /pdf 不可用；不影响普通 Markdown 转图片",
         "obvious_hint": true
       },
+      "pdf_followup_reply_as_pdf": {
+        "type": "bool",
+        "description": "引用 PDF 追问时回复 PDF",
+        "default": true,
+        "hint": "用户引用机器人发出的 PDF 直接提问（不带 /pdf）时，按 /pdf 追问流程生成一份新的 PDF；关闭后改为图文讲义回答",
+        "obvious_hint": true
+      },
       "pdf_enable_compact_prompt_rules": {
         "type": "bool",
         "description": "启用紧凑排版提示",

@@ -207,6 +207,8 @@ DEFAULT_CFG: Dict[str, Any] = {
 
     # /pdf 指令：生成 PDF 解答（本地编译）
     "enable_pdf_output": True,
+    # 用户引用机器人发出的 PDF 直接提问（不带 /pdf）时，按 /pdf 追问流程回一份新的 PDF
+    "pdf_followup_reply_as_pdf": True,
     # /pdf 提示词是否额外加入“少用行间公式、少换行、页面紧凑”的排版要求
     "pdf_enable_compact_prompt_rules": True,
     # 可选：指定 /pdf 使用的模型（留空=跟随默认会话模型）
@@ -847,6 +849,32 @@ def _walk_object_graph(root: Any, max_depth: int = 8, max_nodes: int = 5000):
                 stack.append((d, depth + 1))
         except Exception:
             continue
+
+
+def _remember_pdf_ctx(st: Dict[str, Any], tex_src: str, msg_id: Optional[str] = None,
+                      file_name: str = "", max_keep: int = 30) -> None:
+    """把已发送 PDF 的 LaTeX 源码绑定到消息 ID 和文件名，供用户引用该 PDF 追问时取回。
+
+    QQ（aiocqhttp）发文件拿不到 message_id，但被引用消息里会带回文件名，所以文件名也要记一份。
+    """
+    if not tex_src:
+        return
+    for map_key, k in (("pdf_ctx_map", msg_id), ("pdf_name_ctx_map", file_name)):
+        k = str(k or "").strip()
+        if not k:
+            continue
+        mp = st.setdefault(map_key, {})
+        if not isinstance(mp, dict):
+            continue
+        mp[k] = tex_src
+        # 控制缓存大小（FIFO）
+        while len(mp) > max_keep:
+            try:
+                mp.pop(next(iter(mp)))
+            except Exception:
+                break
+    if msg_id:
+        st["last_pdf_msg_id"] = str(msg_id)
 
 
 def _extract_stream_lines_only(raw: str) -> List[str]:

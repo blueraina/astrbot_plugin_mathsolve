@@ -226,16 +226,8 @@ class Md2ImgSolveMathPdfTool(FunctionTool[AstrAgentContext]):
                     if image_urls:
                         st["last_image_urls"] = list(image_urls)
                         st["last_image_ts"] = now_ts
-                    if sent_msg_id and generated_tex_src:
-                        mp = st.setdefault("pdf_ctx_map", {})
-                        if isinstance(mp, dict):
-                            mp[str(sent_msg_id)] = generated_tex_src
-                            while len(mp) > 30:
-                                try:
-                                    mp.pop(next(iter(mp)))
-                                except Exception:
-                                    break
-                        st["last_pdf_msg_id"] = str(sent_msg_id)
+                    if send_ok:
+                        _remember_pdf_ctx(st, generated_tex_src, msg_id=sent_msg_id, file_name=fname)
         except Exception:
             pass
 
@@ -333,16 +325,8 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
                     if image_urls:
                         st["last_image_urls"] = list(image_urls)
                         st["last_image_ts"] = now_ts
-                    if sent_msg_id and generated_tex_src:
-                        mp = st.setdefault("pdf_ctx_map", {})
-                        if isinstance(mp, dict):
-                            mp[str(sent_msg_id)] = generated_tex_src
-                            while len(mp) > 30:
-                                try:
-                                    mp.pop(next(iter(mp)))
-                                except Exception:
-                                    break
-                        st["last_pdf_msg_id"] = str(sent_msg_id)
+                    if send_ok:
+                        _remember_pdf_ctx(st, generated_tex_src, msg_id=sent_msg_id, file_name=fname)
         except Exception:
             pass
 
@@ -1017,6 +1001,72 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         return False
 
+    def _reply_pdf_file_names(self, event: AstrMessageEvent) -> List[str]:
+        """取出被引用消息里的 PDF 文件名（aiocqhttp 会把被引用消息的组件放在 Reply.chain 里）。"""
+        names: List[str] = []
+        try:
+            comps = getattr(getattr(event, "message_obj", None), "message", None) or []
+            for comp in comps:
+                if comp.__class__.__name__.lower() != "reply":
+                    continue
+                for sub in (getattr(comp, "chain", None) or []):
+                    name = str(getattr(sub, "name", "") or "").strip()
+                    if name.lower().endswith(".pdf"):
+                        names.append(name)
+        except Exception:
+            pass
+        return names
+
+    def _resolve_reply_pdf_ctx(self, event: AstrMessageEvent, state: Dict[str, Any],
+                               reply_id: Optional[str]) -> Tuple[str, bool]:
+        """找出用户引用的那份 PDF 的 LaTeX 源码。
+
+        返回 (LaTeX 源码, 是否确认引用的就是这份 PDF)。message_id / 文件名精确命中，
+        或被引用消息里确实带了 PDF 时才算确认；否则只是“有引用就弱绑定到最近一次 PDF”。
+        """
+        if not reply_id:
+            return "", False
+
+        # 1) 优先：按“被引用消息 id -> LaTeX 源码”精确匹配
+        try:
+            mp = state.get("pdf_ctx_map", {})
+            if isinstance(mp, dict):
+                ctx = (mp.get(str(reply_id)) or "").strip()
+                if ctx:
+                    return ctx, True
+        except Exception:
+            pass
+
+        # 2) 按被引用消息里的 PDF 文件名匹配（QQ 发文件拿不到 message_id，只能靠文件名）
+        names = self._reply_pdf_file_names(event)
+        try:
+            name_mp = state.get("pdf_name_ctx_map", {})
+            if isinstance(name_mp, dict):
+                for name in names:
+                    ctx = (name_mp.get(name) or "").strip()
+                    if ctx:
+                        return ctx, True
+        except Exception:
+            pass
+
+        # 3) 兜底：如果无法获取 bot 消息 id（或历史版本没存），则在“存在引用”时弱绑定到最近一次 PDF
+        last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
+        if not last_pdf_ctx:
+            return "", False
+        last_mid = str(state.get("last_pdf_msg_id", "") or "").strip()
+        if last_mid and str(reply_id) == last_mid:
+            return last_pdf_ctx, True
+        if names:
+            # 引用的是一份对不上号的 PDF（不是本会话记录过的）：只作弱参考
+            return last_pdf_ctx, False
+        # 某些适配器能拿到被引用消息内容：若确实包含 pdf，则允许兜底
+        if self._reply_msg_has_pdf_hint(event):
+            return last_pdf_ctx, True
+        if not last_mid:
+            # 没有任何 message_id 绑定信息：只能退化为“只要用户引用，就使用最近一次 PDF”
+            return last_pdf_ctx, False
+        return "", False
+
     def _build_msg_chain_from_components(self, comps: List[Any]) -> Any:
         """把 Comp.* 组件列表转换成可用于 event.send 的对象（尽量兼容不同 AstrBot 版本）。"""
         comps = list(comps or [])
@@ -1171,6 +1221,104 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             self._log_pdf_file_send_failure(label, pdf_path, fname, e)
             return None, self._pdf_file_send_failure_message(pdf_path, fname, e, label=label)
 
+    def _pdf_generation_error_message(self, event: AstrMessageEvent, e: Exception) -> str:
+        """记录 /pdf 生成失败日志，并返回发给用户的提示。"""
+        err = str(e)
+        try:
+            log_snip = (self._last_texlive_log or "").strip()
+            if log_snip:
+                log_snip = log_snip[-2000:]
+            logger.error(f"PDF 生成失败: {err}\nCompile log snippet:\n{log_snip}")
+        except Exception:
+            logger.error(f"PDF 生成失败: {err}")
+
+        if "Upstream Error" in err:
+            _sn = (event.get_sender_name() or "我").strip() or "我"
+            return f"呜哇，{_sn} 够不到那张图片啦！它好像溜走了（链接过期或拒绝访问）。😣\n能不能麻烦你重新截图再发给我一次?"
+        if "PDF 模型调用全部失败" in err:
+            return (
+                "❌ PDF 生成失败：已按顺序尝试所有配置的模型，但都超时或调用失败。\n"
+                "请检查 pdf_provider_id 与候补模型 1~5 里的 provider_id 是否可用，"
+                "或在 WebUI 里适当调大对应模型的超时时间。\n\n"
+                + err[:700]
+            )
+        # 给用户一个简短的日志末尾，方便快速定位是“缺包/字体”还是“内容里有非法字符”
+        msg = "哎呀，PDF 生成失败了，看起来是排版出了点小差错，重问一次试试吧~"
+        try:
+            log_snip = (self._last_texlive_log or "").strip()
+            if log_snip:
+                tail_lines = "\n".join(log_snip.splitlines()[-20:])
+                tail_lines = tail_lines[-1500:]
+                msg += "\n\nxelatex 日志末尾(截取)：\n" + tail_lines
+        except Exception:
+            pass
+        return msg
+
+    async def _reply_pdf_followup_as_pdf(self, event: AstrMessageEvent, skey: str,
+                                         question: str, ref_pdf_ctx: str) -> None:
+        """用户引用 PDF 直接追问（没带 /pdf）时，按 /pdf 追问流程生成一份新的 PDF 并发送。"""
+
+        async def _send_text(text: str) -> None:
+            try:
+                await event.send(MessageChain().message(text))
+            except Exception as e:
+                logger.error(f"send pdf followup msg failed: {e}")
+
+        await _send_text("收到追问，正在结合你引用的 PDF 生成详细解答...\n你知道吗？" + _get_daily_math_fact())
+
+        # 标记：本次 LLM 调用用于 /pdf 生成，避免其它 on_llm_request 逻辑误注入
+        try:
+            event.set_extra("md2img_pdf_generation", True)
+        except Exception:
+            pass
+
+        try:
+            pdf_path, fname, generated_tex_src = await self._solve_math_to_pdf(
+                problem_text=question,
+                event=event,
+                image_urls=[],
+                ref_pdf_latex=ref_pdf_ctx,
+            )
+        except Exception as e:
+            await _send_text(self._pdf_generation_error_message(event, e))
+            return
+
+        try:
+            import astrbot.api.message_components as Comp
+        except Exception:
+            await _send_text("当前 AstrBot 版本缺少文件消息组件，无法发送 PDF")
+            return
+
+        chain = []
+        uid = event.get_sender_id()
+        if uid and (not self._is_private_chat(event)):
+            chain.append(Comp.At(qq=uid))
+        sent_msg_id, send_error_msg = await self._send_pdf_file_component(event, Comp, chain, pdf_path, fname, label="PDF")
+        if send_error_msg:
+            await _send_text(send_error_msg)
+            return
+
+        # 追问 PDF 同样可以被再次引用追问
+        if generated_tex_src:
+            try:
+                async with self._state_lock:
+                    st = MATH_SESSION_STATE.setdefault(skey, {})
+                    st["last_active_ts"] = time.time()
+                    st["last_pdf_context"] = generated_tex_src
+                    _remember_pdf_ctx(st, generated_tex_src, msg_id=sent_msg_id, file_name=fname)
+            except Exception:
+                pass
+
+        await self._daily_report_record_answer(
+            event=event,
+            kind="pdf",
+            question=question,
+            answer="PDF 追问解答",
+            tex_src=generated_tex_src or "",
+            pdf_path=pdf_path,
+            image_urls=[],
+        )
+
     # === 快捷指令 1: PC 模式 ===
     @filter.command("pc")
     async def cmd_pc(self, event: AstrMessageEvent):
@@ -1213,6 +1361,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             st.pop("last_pdf_context", None)
             st.pop("last_pdf_msg_id", None)
             st.pop("pdf_ctx_map", None)
+            st.pop("pdf_name_ctx_map", None)
 
         # 2) 清除 AstrBot 框架层面的对话上下文（多种方式兼容不同版本）
         umo = getattr(event, "unified_msg_origin", None) or ""
@@ -1459,29 +1608,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         # 若用户“引用/回复”了机器人之前发出的 PDF 文件消息：尽量把对应 PDF 的 LaTeX 源码取出来，
         # 作为本次 /pdf 追问的参考上下文（避免模型遗忘上一份 PDF 的细节）。
-        ref_pdf_ctx = ""
-        if reply_id:
-            try:
-                mp = state.get("pdf_ctx_map", {})
-                if isinstance(mp, dict):
-                    ref_pdf_ctx = (mp.get(str(reply_id)) or "").strip()
-            except Exception:
-                ref_pdf_ctx = ""
-
-            # 兜底：没有精确 message_id 映射时，弱绑定到“最近一次 PDF”
-            if not ref_pdf_ctx:
-                last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
-                if last_pdf_ctx:
-                    last_mid = str(state.get("last_pdf_msg_id", "") or "").strip()
-                    if last_mid:
-                        if str(reply_id) == last_mid:
-                            ref_pdf_ctx = last_pdf_ctx
-                        else:
-                            # 若适配器能拿到被引用消息内容且确实包含 PDF，则允许兜底
-                            if self._reply_msg_has_pdf_hint(event):
-                                ref_pdf_ctx = last_pdf_ctx
-                    else:
-                        ref_pdf_ctx = last_pdf_ctx
+        ref_pdf_ctx, _ = self._resolve_reply_pdf_ctx(event, state, reply_id)
 
         # 标记：本次 LLM 调用用于 /pdf 生成，避免其它 on_llm_request 逻辑误注入
         try:
@@ -1521,37 +1648,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                     st["last_image_urls"] = list(final_image_inputs)
                     st["last_image_ts"] = now_ts
         except Exception as e:
-            err = str(e)
-            try:
-                log_snip = (self._last_texlive_log or "").strip()
-                if log_snip:
-                    log_snip = log_snip[-2000:]
-                logger.error(f"PDF 生成失败: {err}\nCompile log snippet:\n{log_snip}")
-            except Exception:
-                logger.error(f"PDF 生成失败: {err}")
-
-            if "Upstream Error" in err:
-                _sn = (event.get_sender_name() or "我").strip() or "我"
-                yield event.plain_result(f"呜哇，{_sn} 够不到那张图片啦！它好像溜走了（链接过期或拒绝访问）。😣\n能不能麻烦你重新截图再发给我一次?")
-            elif "PDF 模型调用全部失败" in err:
-                yield event.plain_result(
-                    "❌ PDF 生成失败：已按顺序尝试所有配置的模型，但都超时或调用失败。\n"
-                    "请检查 pdf_provider_id 与候补模型 1~5 里的 provider_id 是否可用，"
-                    "或在 WebUI 里适当调大对应模型的超时时间。\n\n"
-                    + err[:700]
-                )
-            else:
-                # 给用户一个简短的日志末尾，方便快速定位是“缺包/字体”还是“内容里有非法字符”
-                msg = "哎呀，PDF 生成失败了，看起来是排版出了点小差错，重问一次试试吧~"
-                try:
-                    log_snip = (self._last_texlive_log or "").strip()
-                    if log_snip:
-                        tail_lines = "\n".join(log_snip.splitlines()[-20:])
-                        tail_lines = tail_lines[-1500:]
-                        msg += "\n\nxelatex 日志末尾(截取)：\n" + tail_lines
-                except Exception:
-                    pass
-                yield event.plain_result(msg)
+            yield event.plain_result(self._pdf_generation_error_message(event, e))
             return
 
         # 发送 PDF 文件
@@ -1577,22 +1674,12 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             yield event.plain_result(send_error_msg)
             return
 
-        # 若成功拿到 message_id，则把本次 PDF 的 LaTeX 源码与该消息绑定，供用户引用追问
-        if sent_msg_id and generated_tex_src:
+        # 把本次 PDF 的 LaTeX 源码与该消息（message_id / 文件名）绑定，供用户引用追问
+        if generated_tex_src:
             try:
                 async with self._state_lock:
                     st = MATH_SESSION_STATE.setdefault(skey, {})
-                    mp = st.setdefault("pdf_ctx_map", {})
-                    if isinstance(mp, dict):
-                        mp[str(sent_msg_id)] = generated_tex_src
-                        # 控制缓存大小：最多保留 30 条（FIFO）
-                        max_keep = 30
-                        while len(mp) > max_keep:
-                            try:
-                                mp.pop(next(iter(mp)))
-                            except Exception:
-                                break
-                    st["last_pdf_msg_id"] = str(sent_msg_id)
+                    _remember_pdf_ctx(st, generated_tex_src, msg_id=sent_msg_id, file_name=fname)
             except Exception:
                 pass
 
@@ -1708,26 +1795,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         yield event.plain_result("正在生成中...\n你知道吗？" + _get_daily_math_fact())
 
-        ref_pdf_ctx = ""
-        if reply_id:
-            try:
-                mp = state.get("pdf_ctx_map", {})
-                if isinstance(mp, dict):
-                    ref_pdf_ctx = (mp.get(str(reply_id)) or "").strip()
-            except Exception:
-                ref_pdf_ctx = ""
-            if not ref_pdf_ctx:
-                last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
-                if last_pdf_ctx:
-                    last_mid = str(state.get("last_pdf_msg_id", "") or "").strip()
-                    if last_mid:
-                        if str(reply_id) == last_mid:
-                            ref_pdf_ctx = last_pdf_ctx
-                        else:
-                            if self._reply_msg_has_pdf_hint(event):
-                                ref_pdf_ctx = last_pdf_ctx
-                    else:
-                        ref_pdf_ctx = last_pdf_ctx
+        ref_pdf_ctx, _ = self._resolve_reply_pdf_ctx(event, state, reply_id)
 
         try:
             event.set_extra("md2img_pdf_generation", True)
@@ -1851,20 +1919,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             yield event.plain_result(send_error_msg)
             return
 
-        if sent_msg_id and generated_tex_src:
+        if generated_tex_src:
             try:
                 async with self._state_lock:
                     st = MATH_SESSION_STATE.setdefault(skey, {})
-                    mp = st.setdefault("pdf_ctx_map", {})
-                    if isinstance(mp, dict):
-                        mp[str(sent_msg_id)] = generated_tex_src
-                        max_keep = 30
-                        while len(mp) > max_keep:
-                            try:
-                                mp.pop(next(iter(mp)))
-                            except Exception:
-                                break
-                    st["last_pdf_msg_id"] = str(sent_msg_id)
+                    _remember_pdf_ctx(st, generated_tex_src, msg_id=sent_msg_id, file_name=fname)
             except Exception:
                 pass
 
@@ -2048,32 +2107,16 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         # 注入 PDF 上下文（仅在用户“引用/回复”了机器人发出的 PDF 消息时才注入，避免影响下一题）
         # reply_id 已在前面提取
-        pdf_ctx_to_inject = ""
-        if reply_id:
-            # 1) 优先：按“被引用消息 id -> LaTeX 源码”精确匹配
-            try:
-                mp = state.get("pdf_ctx_map", {})
-                if isinstance(mp, dict):
-                    pdf_ctx_to_inject = (mp.get(str(reply_id)) or "").strip()
-            except Exception:
-                pdf_ctx_to_inject = ""
+        pdf_ctx_to_inject, pdf_ref_confirmed = self._resolve_reply_pdf_ctx(event, state, reply_id)
+        # 确认用户是引用某份 PDF 在追问（而不是随手引用了别的消息）
+        is_pdf_followup = bool(pdf_ctx_to_inject and pdf_ref_confirmed and user_text and (not current_images))
 
-            # 2) 兜底：如果无法获取 bot 消息 id（或历史版本没存），则在“存在引用”时弱绑定到最近一次 PDF
-            if not pdf_ctx_to_inject:
-                last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
-                if last_pdf_ctx:
-                    last_mid = str(state.get("last_pdf_msg_id", "") or "").strip()
-                    if last_mid:
-                        # 只有引用 id 与最后一次 PDF 消息一致时才注入（避免串题）
-                        if str(reply_id) == last_mid:
-                            pdf_ctx_to_inject = last_pdf_ctx
-                        else:
-                            # 某些适配器能拿到被引用消息内容：若确实包含 pdf，则允许兜底
-                            if self._reply_msg_has_pdf_hint(event):
-                                pdf_ctx_to_inject = last_pdf_ctx
-                    else:
-                        # 没有任何 message_id 绑定信息：只能退化为“只要用户引用，就使用最近一次 PDF”
-                        pdf_ctx_to_inject = last_pdf_ctx
+        # 引用 PDF 追问默认直接回一份新的 PDF（与 /pdf 追问同一流程），不再走图文回答
+        if (is_pdf_followup and bool(self._cfg("pdf_followup_reply_as_pdf", True))
+                and bool(self._cfg("enable_pdf_output", True))):
+            event.stop_event()  # 阻止本次默认 LLM 调用
+            await self._reply_pdf_followup_as_pdf(event, skey, user_text, pdf_ctx_to_inject)
+            return
 
         if pdf_ctx_to_inject and user_text:
             req.system_prompt = (req.system_prompt or "") + (
@@ -2082,7 +2125,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 f"[START LATEX CONTEXT]\n{pdf_ctx_to_inject}\n[END LATEX CONTEXT]\n"
             )
 
-        router = await self._router_classify(user_text) if user_text else None
+        router = await self._router_classify(user_text) if (user_text and not is_pdf_followup) else None
 
         heuristic_is_math = _is_math_question(user_text)
         explicit_hint = any(k in user_text for k in _HINT_PREF)
@@ -2098,6 +2141,10 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             is_math = True
         if bool(current_images) and treat_img_as_math:
             is_math = True
+        if is_pdf_followup:
+            # 引用 PDF 追问：一律按完整讲义回答，不落到普通闲聊或提示流
+            is_math = True
+            explicit_hint = False
 
         if is_math and explicit_hint and not wants_full:
             return
@@ -2108,8 +2155,8 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if not (is_math or is_followup_full):
             return
 
-        # 记录“上一题”
-        if is_math:
+        # 记录“上一题”（引用 PDF 追问不是新题，不覆盖）
+        if is_math and not is_pdf_followup:
             async with self._state_lock:
                 st = MATH_SESSION_STATE.setdefault(skey, {})
                 st["last_active_ts"] = time.time()
@@ -2137,10 +2184,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             has_image=bool(current_images),
             kb_query=kb_query,
             kb_n=kb_n,
+            pdf_followup=is_pdf_followup,
         )
 
     def _build_math_system_prompt(self, mode: str, persona: str, has_image: bool, kb_query: bool = False,
-                                  kb_n: int = 2) -> str:
+                                  kb_n: int = 2, pdf_followup: bool = False) -> str:
         persona = persona.strip() or DEFAULT_CFG["math_persona"]
         img_hint = "用户发来的是图片题 请先读题 再给出完整解答" if has_image else ""
         visual_rules = ""
@@ -2174,6 +2222,25 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                     "如果用户同时给了要解的具体题目或要求解答，请在检索结果后追加：\n"
                     "## 解答\n"
                     "并给出该题完整推导与最终答案（可用 LaTeX 例如 $$...$$）\n"
+                )
+
+            if pdf_followup:
+                # 引用 PDF 追问：紧扣追问点讲透，而不是套用新题模板给一份简略讲义
+                return (
+                    "\n[数学答疑/PDF 追问]\n"
+                    f"你的人格设定：{persona}\n"
+                    "用户引用了你之前发出的 PDF 解答，正在追问其中的内容；该 PDF 的 LaTeX 源码见上文 [START LATEX CONTEXT] 部分\n"
+                    "请紧扣用户问到的那一步/那个公式/那个结论作答：先指出它在 PDF 中对应哪一步，再把它讲透——"
+                    "说明用到的定义或定理、补全被省略的中间推导、解释为什么要这样做\n"
+                    "不要只给一两句结论，也不要把整道题从头重做一遍；若有助于理解，可补充一个简单例子或反例\n"
+                    "你必须用 <md>...</md> 包裹整个回答内容\n"
+                    "<md> 内允许使用 Markdown 与 LaTeX 例如 $$...$$\n"
+                    "第一行用 # 写标题，随后先输出浅蓝题目卡片，格式严格如下：\n"
+                    "> [problem-card]\n"
+                    "> **追问：** 这里用一句话复述用户的疑问\n"
+                    "然后用 `## 一、问题定位`、`## 二、详细解释`、`## 三、小结` 分节\n"
+                    "重要定理、关键公式、易错提醒请使用 Markdown 引用块 `>`；除必要的内联 SVG 示意图外，不要直接写 HTML\n"
+                    f"{visual_rules}"
                 )
 
             return (
