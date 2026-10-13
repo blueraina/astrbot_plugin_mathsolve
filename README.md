@@ -34,7 +34,7 @@
 - 支持 TikZ 绘图
 - 支持主模型和候补模型按顺序回退
 - 可选编译自检、自动修复和完整性检查
-- 支持引用上一份 PDF 上下文继续追问
+- 支持引用上一份 PDF 上下文继续追问；直接引用机器人发出的 PDF 提问（不带 `/pdf`）也会回一份针对该追问的新 PDF
 
 ### 可选知识库增强
 
@@ -265,6 +265,7 @@ $$
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enable_pdf_output` | `true` | `/pdf` 指令开关 |
+| `pdf_followup_reply_as_pdf` | `true` | 引用机器人发出的 PDF 直接提问时，按 `/pdf` 追问流程回复新的 PDF；关闭后改为图文讲义回答 |
 | `pdf_provider_id` | `""` | `/pdf` 主模型，下拉选择；留空=当前会话模型 |
 | `pdf_provider_timeout_sec` | `180` | 主模型调用超时 |
 | `pdf_enable_provider_preflight` | `true` | 生成前做模型连通性预检 |
