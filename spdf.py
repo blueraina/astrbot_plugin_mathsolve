@@ -1,12 +1,31 @@
 # -*- coding: utf-8 -*-
 try:
     from .shared import *
+    from .pdf_styles import randomized_pdf_style
+    from .usage_tracking import tracked_generation, record_model_call
+    from .spdf_schedule import SpdfAccessDenied, SpdfAdmission, spdf_access_denial
+    from .token_usage import tracked_spdf_tokens, generate_with_token_usage, append_current_report
+    from .spdf_concurrency import limited_spdf_generation
 except ImportError:
     from shared import *
+    from pdf_styles import randomized_pdf_style
+    from usage_tracking import tracked_generation, record_model_call
+    from spdf_schedule import SpdfAccessDenied, SpdfAdmission, spdf_access_denial
+    from token_usage import tracked_spdf_tokens, generate_with_token_usage, append_current_report
+    from spdf_concurrency import limited_spdf_generation
 
 
 class SpdfMixin:
     """Deep-thinking SPDF generation helpers."""
+
+    def _spdf_require_access(self, event, admission=None):
+        if (isinstance(admission, SpdfAdmission)
+                and admission.owner is self and admission.event is event):
+            return admission
+        reason = spdf_access_denial(self._cfg, _get_sender_uid(event))
+        if reason:
+            raise SpdfAccessDenied(reason)
+        return SpdfAdmission(self, event)
 
     def _spdf_parse_provider_pool(self, s: str) -> List[str]:
         r"""把 'a,b c\nd' 解析成 provider_id 列表。"""
@@ -179,7 +198,8 @@ class SpdfMixin:
     async def _spdf_llm_generate(self, provider_id: str, prompt: str, image_urls: Optional[List[str]] = None) -> str:
         """带并发限制的 llm_generate，返回 completion_text。"""
         async with self._spdf_solver_sema:
-            llm_resp = await self.context.llm_generate(
+            record_model_call(provider_id)
+            llm_resp = await generate_with_token_usage(self,
                 chat_provider_id=provider_id,
                 prompt=prompt,
                 image_urls=image_urls if image_urls else [],
@@ -738,10 +758,11 @@ class SpdfMixin:
         has_image = bool(image_urls)
         ref_pdf_latex = (ref_pdf_latex or "").strip()
 
-        if ref_pdf_latex and (not has_image):
+        if ref_pdf_latex:
             base_prompt = self._build_pdf_followup_prompt(
                 question_text=problem_text,
                 ref_pdf_latex=ref_pdf_latex,
+                has_image=has_image,
             )
         else:
             base_prompt = self._build_pdf_latex_prompt(problem_text, has_image=has_image)
@@ -877,14 +898,20 @@ class SpdfMixin:
 
         return final_raw
 
+    @limited_spdf_generation
+    @tracked_generation('spdf')
+    @tracked_spdf_tokens
+    @randomized_pdf_style
     async def _solve_math_to_spdf(
         self,
         problem_text: str,
         event: AstrMessageEvent,
         image_urls: Optional[List[str]] = None,
         ref_pdf_latex: str = "",
+        _admission=None,
     ):
         """/spdf：DeepThink 多角色迭代版 —— 最终仍输出 PDF（本地 xelatex 编译）。"""
+        self._spdf_require_access(event, _admission)
         provider_id = str(self._cfg("spdf_provider_id", "") or "").strip()
 
         current_provider_id = ""
@@ -895,7 +922,7 @@ class SpdfMixin:
 
         original_image_count = len(image_urls or [])
         if image_urls:
-            image_urls = await self._pdf_snapshot_image_urls(image_urls)
+            image_urls = await self._pdf_snapshot_image_urls(image_urls, event=event)
         has_image = bool(image_urls)
         if original_image_count and (not has_image) and (not str(problem_text or "").strip()):
             raise RuntimeError("Upstream Error: Image invalid")
@@ -1058,7 +1085,8 @@ class SpdfMixin:
                             prev_raw=raw,
                         )
 
-                        llm_resp = await self.context.llm_generate(
+                        record_model_call(provider_id)
+                        llm_resp = await generate_with_token_usage(self,
                             chat_provider_id=provider_id,
                             prompt=repair_prompt,
                             image_urls=image_urls if image_urls else [],
@@ -1178,7 +1206,8 @@ class SpdfMixin:
                         prev_raw=raw,
                     )
 
-                    llm_resp = await self.context.llm_generate(
+                    record_model_call(provider_id)
+                    llm_resp = await generate_with_token_usage(self,
                         chat_provider_id=provider_id,
                         prompt=repair_prompt,
                         image_urls=image_urls if image_urls else [],
@@ -1299,10 +1328,14 @@ class SpdfMixin:
             log_snip = (self._last_texlive_log or "").strip()[:1000]
             raise RuntimeError(f"Compile failed. Log: {log_snip}")
 
+        # All generation/judgement/repair calls have finished. Stamp a small
+        # final-page usage footer without another model call or compilation.
+        pdf_bytes = await append_current_report(pdf_bytes, event)
+
         user_name = _get_sender_display_name(event)
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        rand = uuid.uuid4().hex[:8]
-        fname = _sanitize_filename(f"{user_name}-{ts}-{rand}.pdf")
+        # Microseconds distinguish concurrent requests without a random filename suffix.
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        fname = _sanitize_filename(f"Deepthink-{user_name}-{ts}.pdf")
 
         pdf_path = os.path.join(self.PDF_CACHE_DIR, fname)
         tmp_path = pdf_path + f".tmp-{uuid.uuid4().hex}"

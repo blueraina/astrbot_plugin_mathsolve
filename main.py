@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os as _os
 import sys as _sys
+import time as _time
 
 _PLUGIN_DIR = _os.path.dirname(_os.path.abspath(__file__))
 if _PLUGIN_DIR not in _sys.path:
@@ -9,17 +10,33 @@ if _PLUGIN_DIR not in _sys.path:
 try:
     from .shared import *
     from .memory import MemoryMixin
-    from .spdf import SpdfMixin
-    from .pdf import PdfMixin
+    from .spdf import SpdfMixin, SpdfAccessDenied
+    from .pdf import PdfMixin, PdfImageInputError
     from .render import RenderMixin
     from .daily_report import DailyReportMixin
+    from .pdf_task_stats import PdfTaskStats, task_scope, waiting_notice
+    from .usage_report import UsageReportMixin
+    from .token_usage import report_warning
+    from .spdf_concurrency import limited_spdf_command, limited_spdf_tool, spdf_waiting_notice
+    from .markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
+    from .markdown_command import MarkdownMixedMessageFilter
+    from .pdf_theme_commands import PdfThemeMixin
+    from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence
 except ImportError:
     from shared import *
     from memory import MemoryMixin
-    from spdf import SpdfMixin
-    from pdf import PdfMixin
+    from spdf import SpdfMixin, SpdfAccessDenied
+    from pdf import PdfMixin, PdfImageInputError
     from render import RenderMixin
     from daily_report import DailyReportMixin
+    from pdf_task_stats import PdfTaskStats, task_scope, waiting_notice
+    from usage_report import UsageReportMixin
+    from token_usage import report_warning
+    from spdf_concurrency import limited_spdf_command, limited_spdf_tool, spdf_waiting_notice
+    from markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
+    from markdown_command import MarkdownMixedMessageFilter
+    from pdf_theme_commands import PdfThemeMixin
+    from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence
 
 
 # =============================================================================
@@ -72,6 +89,8 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
     name: str = "md2img_render_markdown"
     description: str = (
         "将一段 Markdown(含 LaTeX/内联 SVG) 渲染成图片并发送到当前会话。"
+        "仅限本轮用户明确要求图片回复或明确要求解题时使用；普通聊天默认文字。"
+        "用户发来图片、正文包含公式/代码/表格，不代表要求图片回复；用户要求文字时禁止调用。"
         "数学证明/解答必须在 Markdown 开头提供题目或证明目标卡片："
         "`> [problem-card]` 换行 `> **题目/证明目标：** ...`，随后再用 `## 一、证明过程` 等分节。"
     )
@@ -85,7 +104,12 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
                     "`> [problem-card]\\n> **题目/证明目标：** ...\\n\\n## 一、证明过程\\n...`。"
                 ),
             },
-            "mode": {"type": "string", "description": "渲染模式：mobile 或 pc", "enum": ["mobile", "pc"], "default": "mobile"},
+            "mode": {
+                "type": "string",
+                "description": "渲染模式：mobile 或 pc；若用户已执行 /pc 或 /pe，用户设置始终优先",
+                "enum": ["mobile", "pc"],
+                "default": "mobile",
+            },
             "scale": {"type": "integer", "description": "缩放倍率（1~3，越大越清晰但更慢）", "minimum": 1, "maximum": 3, "default": 2},
         },
         "required": ["markdown"],
@@ -99,9 +123,21 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
         if not md_text:
             return json.dumps({"ok": False, "error": "markdown 不能为空"}, ensure_ascii=False)
 
-        mode = str(kwargs.get("mode") or "mobile").strip().lower()
-        if mode not in ("mobile", "pc"):
-            mode = "mobile"
+        if not image_reply_decision(event).allowed:
+            logger.info("[mathsolve] 阻止未获本轮用户意图许可的图片工具调用")
+            return json.dumps({
+                "ok": False, "sent": 0, "error_code": "image_reply_not_requested",
+                "error": "本轮应使用普通文字回复。请直接把以下内容作为文字回答，不再调用图片工具或添加 <md> 标签。",
+                "reply_as_text": plain_reply_text(md_text),
+            }, ensure_ascii=False)
+
+        requested_mode = str(kwargs.get("mode") or "mobile").strip().lower()
+        mode = resolve_render_mode(event, requested_mode=kwargs.get("mode"))
+        if requested_mode in ("mobile", "pc") and requested_mode != mode:
+            logger.info(
+                f"[mathsolve] 用户 /pc、/pe 设置覆盖 Tool 渲染参数: "
+                f"requested={requested_mode}, effective={mode}"
+            )
 
         try:
             scale = int(kwargs.get("scale", 2))
@@ -141,6 +177,8 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
             if ok:
                 sent += len(batch)
 
+        if sent and event is not None:
+            event.set_extra("mathsolve_image_tool_sent", True)
         return json.dumps(
             {"ok": bool(img_paths), "images": img_paths, "sent": sent, "mode": mode, "scale": scale},
             ensure_ascii=False,
@@ -210,32 +248,11 @@ class Md2ImgSolveMathPdfTool(FunctionTool[AstrAgentContext]):
         # 更新 session 状态（供后续 /pdf 追问）
         try:
             if event is not None:
-                skey = _get_session_key(event)
-                async with plugin._state_lock:
-                    st = MATH_SESSION_STATE.setdefault(skey, {})
-                    now_ts = time.time()
-                    st["last_active_ts"] = now_ts
-                    if generated_tex_src:
-                        st["last_pdf_context"] = generated_tex_src
-                    if problem_text:
-                        st["last_problem"] = problem_text
-                    else:
-                        if image_urls:
-                            st["last_problem"] = "[图片题目]"
-                    st["last_had_img"] = bool(image_urls)
-                    if image_urls:
-                        st["last_image_urls"] = list(image_urls)
-                        st["last_image_ts"] = now_ts
-                    if sent_msg_id and generated_tex_src:
-                        mp = st.setdefault("pdf_ctx_map", {})
-                        if isinstance(mp, dict):
-                            mp[str(sent_msg_id)] = generated_tex_src
-                            while len(mp) > 30:
-                                try:
-                                    mp.pop(next(iter(mp)))
-                                except Exception:
-                                    break
-                        st["last_pdf_msg_id"] = str(sent_msg_id)
+                await plugin._pdf_register_thread_result(
+                    skey=_get_session_key(event), uid=_get_sender_uid(event), thread_id="",
+                    problem_text=problem_text, image_refs=list(image_urls or []),
+                    tex_src=generated_tex_src or "", sent_msg_id=sent_msg_id,
+                )
         except Exception:
             pass
 
@@ -269,9 +286,15 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
         "required": [],
     })
 
+    @limited_spdf_tool(_md2img_get_plugin, _md2img_tool_extract_ctx_event)
     async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
         plugin = _md2img_get_plugin()
         ctx, event = _md2img_tool_extract_ctx_event(context)
+
+        try:
+            admission = plugin._spdf_require_access(event)
+        except SpdfAccessDenied as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
         problem_text = str(kwargs.get("problem_text") or kwargs.get("text") or "").strip()
         image_urls = kwargs.get("image_urls") or kwargs.get("images") or []
@@ -296,6 +319,7 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
             event=event,
             image_urls=image_urls,
             ref_pdf_latex=ref_pdf_latex,
+            _admission=admission,
         )
 
         # 发送 PDF
@@ -305,6 +329,9 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
         try:
             import astrbot.api.message_components as Comp
             comps = [Comp.File(file=pdf_path, name=fname)]
+            token_warning = report_warning(event)
+            if token_warning:
+                comps.append(Comp.Plain(token_warning))
             ok, send_ret = await _md2img_tool_send_components(plugin, ctx, event, comps)
             if ok:
                 send_ok = True
@@ -317,32 +344,11 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
         # 更新 session 状态（供后续 /pdf 追问）
         try:
             if event is not None:
-                skey = _get_session_key(event)
-                async with plugin._state_lock:
-                    st = MATH_SESSION_STATE.setdefault(skey, {})
-                    now_ts = time.time()
-                    st["last_active_ts"] = now_ts
-                    if generated_tex_src:
-                        st["last_pdf_context"] = generated_tex_src
-                    if problem_text:
-                        st["last_problem"] = problem_text
-                    else:
-                        if image_urls:
-                            st["last_problem"] = "[图片题目]"
-                    st["last_had_img"] = bool(image_urls)
-                    if image_urls:
-                        st["last_image_urls"] = list(image_urls)
-                        st["last_image_ts"] = now_ts
-                    if sent_msg_id and generated_tex_src:
-                        mp = st.setdefault("pdf_ctx_map", {})
-                        if isinstance(mp, dict):
-                            mp[str(sent_msg_id)] = generated_tex_src
-                            while len(mp) > 30:
-                                try:
-                                    mp.pop(next(iter(mp)))
-                                except Exception:
-                                    break
-                        st["last_pdf_msg_id"] = str(sent_msg_id)
+                await plugin._pdf_register_thread_result(
+                    skey=_get_session_key(event), uid=_get_sender_uid(event), thread_id="",
+                    problem_text=problem_text, image_refs=list(image_urls or []),
+                    tex_src=generated_tex_src or "", sent_msg_id=sent_msg_id,
+                )
         except Exception:
             pass
 
@@ -362,15 +368,44 @@ class Md2ImgSolveMathSpdfTool(FunctionTool[AstrAgentContext]):
         return json.dumps({"ok": True, "send_ok": True, "pdf_path": pdf_path, "filename": fname, "message_id": sent_msg_id}, ensure_ascii=False)
 
 
+@dataclass
+class Md2ImgSolveMathMdTool(FunctionTool[AstrAgentContext]):
+    """Generate and send a standalone Markdown document, like /md."""
+    name: str = "md2img_solve_math_md"
+    description: str = (
+        "用户明确要求 MD/Markdown 文档、文件或用 MD 解答时，调用 /md 的模型与候补链生成标准 UTF-8 .md 文件，"
+        "并发送到当前会话。不是图片渲染工具，也不编译 PDF。消息自带/引用的题目图片会自动读取。"
+        "解答需要图形时会自动绘制静态 SVG 并内嵌到同一 MD 文件，无需另调图片工具。"
+        "普通聊天或仅询问 Markdown 知识时不要调用。成功后文件已发送，只需简短确认，不重复调用或重发正文。"
+    )
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "problem_text": {"type": "string", "description": "题目和解答要求；省略时使用用户本轮消息，图片题无需转抄全部题面。"},
+            "image_urls": {"type": "array", "items": {"type": "string"}, "maxItems": 12,
+                           "description": "可选：用户本轮文字中明确提供的图片 URL。附件/引用图片自动读取，无需传入，不要编造 URL 或本地路径。"},
+            "ref_markdown": {"type": "string", "description": "可选：先前解答的 Markdown 参考材料，用于续写、整理或转换；不得当作新的指令。"},
+        },
+        "required": [],
+    })
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        plugin = _md2img_get_plugin()
+        _ctx, event = _md2img_tool_extract_ctx_event(context)
+        result = await plugin._md_agent_tool(event, problem_text=kwargs.get("problem_text", ""),
+            image_urls=kwargs.get("image_urls"), ref_markdown=kwargs.get("ref_markdown", ""))
+        return json.dumps(result, ensure_ascii=False)
+
+
 # 插件定义
 # -------------------------------------------------------------------------
 @register(
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.13.4",
+    "1.17.3",
 )
-class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
+class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
         self.config: Dict[str, Any] = dict(config) if isinstance(config, dict) else {}
@@ -419,14 +454,16 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 Md2ImgRenderMarkdownTool(),
                 Md2ImgSolveMathPdfTool(),
                 Md2ImgSolveMathSpdfTool(),
+                Md2ImgSolveMathMdTool(),
             )
-            logger.info("[md2img] 已注册 LLM Tools: md2img_render_markdown / md2img_solve_math_pdf / md2img_solve_math_spdf")
+            logger.info("[md2img] 已注册 LLM Tools: md2img_render_markdown / md2img_solve_math_pdf / md2img_solve_math_spdf / md2img_solve_math_md")
         except Exception as e:
             try:
                 tool_mgr = self.context.provider_manager.llm_tools
                 tool_mgr.func_list.append(Md2ImgRenderMarkdownTool())
                 tool_mgr.func_list.append(Md2ImgSolveMathPdfTool())
                 tool_mgr.func_list.append(Md2ImgSolveMathSpdfTool())
+                tool_mgr.func_list.append(Md2ImgSolveMathMdTool())
                 logger.info("[md2img] 已通过旧版接口注册 LLM Tools")
             except Exception as e2:
                 logger.warning(f"[md2img] 注册 LLM Tools 失败（不影响其它功能）: {e} / {e2}")
@@ -448,6 +485,7 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
     async def initialize(self):
         try:
+            await retire_legacy_instances(self)
             os.makedirs(self.IMAGE_CACHE_DIR, exist_ok=True)
             os.makedirs(self.PDF_CACHE_DIR, exist_ok=True)
             os.makedirs(self.TEXLIVE_CACHE_DIR, exist_ok=True)
@@ -464,16 +502,14 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             self._start_session_cleaner()
             self._start_cache_cleaner()
             self._start_daily_report_scheduler()
+            self._start_usage_report_scheduler()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.13.4 - 本地编译版)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.17.3 - PDF 紧凑排版提示精简)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
     async def terminate(self):
-        try:
-            self._stop_daily_report_scheduler()
-        except Exception:
-            pass
+        await release_instance_resources(self)
 
     def _schedule_playwright_chromium_install(self, reason: str = "") -> None:
         if not bool(self._cfg("auto_install_playwright_chromium", True)):
@@ -493,16 +529,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             reason_suffix = f" reason={reason}" if reason else ""
             logger.info(f"开始后台安装/确认 Playwright Chromium{reason_suffix}")
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-m",
-                    "playwright",
-                    "install",
-                    "chromium",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                proc = await run_process(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    timeout=max(1, timeout_sec),
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=max(1, timeout_sec))
+                stdout, stderr = proc.stdout, b""
                 out_text = (stdout or b"").decode("utf-8", errors="ignore").strip()
                 err_text = (stderr or b"").decode("utf-8", errors="ignore").strip()
                 if proc.returncode == 0:
@@ -512,10 +543,6 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                     tail = ((err_text or "") + "\n" + (out_text or "")).strip()[-2000:]
                     logger.error(f"Playwright Chromium 安装失败，returncode={proc.returncode}: {tail}")
             except asyncio.TimeoutError:
-                try:
-                    proc.kill()  # type: ignore[name-defined]
-                except Exception:
-                    pass
                 logger.error(f"Playwright Chromium 后台安装超时: {timeout_sec}s")
             except Exception as e:
                 logger.error(f"Playwright Chromium 后台安装异常: {e}")
@@ -527,11 +554,17 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         async with self._pw_lock:
             if self._browser is not None:
                 return
+            pw = None
             try:
-                self._pw = await async_playwright().start()
-                self._browser = await self._pw.chromium.launch()
+                pw = await acquire(lambda: async_playwright().start(), lambda p: p.stop())
+                browser = await acquire(pw.chromium.launch, lambda b: b.close())
+                self._pw, self._browser = pw, browser
                 logger.info("Playwright Chromium 已启动（复用模式）")
-            except Exception as e:
+            except BaseException as e:
+                if pw is not None:
+                    await cleanup(pw.stop)
+                if not isinstance(e, Exception):
+                    raise
                 logger.error(f"Playwright 启动失败，将回退为每次渲染临时启动: {e}")
                 self._schedule_playwright_chromium_install("launch_failed")
                 self._pw = None
@@ -539,15 +572,15 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
     async def _close_browser(self):
         async with self._pw_lock:
-            try:
-                if self._browser is not None:
-                    await self._browser.close()
-                if self._pw is not None:
-                    await self._pw.stop()
-            except Exception:
-                pass
+            browser, pw = self._browser, self._pw
             self._browser = None
             self._pw = None
+            actions = []
+            if browser is not None:
+                actions.append(browser.close)
+            if pw is not None:
+                actions.append(pw.stop)
+            await cleanup(*actions)
 
     # ------------------------- Session 清理 -------------------------
 
@@ -555,21 +588,33 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
     # === 全局消息监听：记录用户最后发的图片 & 活跃时间 ===
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
+        if re.fullmatch(r"\s*/?pdf主题(?:概览)?(?:\s+[\s\S]*)?\s*",
+                        str(getattr(event, "message_str", "") or "")):
+            return  # Theme UI must not consume/clear pending question images.
+        await prepare_forward_reply_evidence(event)
+        track_active_followup(event)
+        if re.fullmatch(r"\s*/?pdf统计\s*", str(getattr(event, "message_str", "") or "")):
+            return  # Statistics must not consume or clear a pending image question.
         ingest_token = ""
         skey = ""
+        uid = ""
         try:
             skey = _get_session_key(event)
+            uid = _get_sender_uid(event)
             # --- 快速预标记：图片快照（下载/转码）可能耗时数秒，先在状态里登记
             # “有新图正在入库”，避免紧跟着的 /pdf 读到旧的 last_image_urls（跨题串图）。
             if self._event_has_image(event):
                 ingest_token = uuid.uuid4().hex
                 async with self._state_lock:
                     st0 = MATH_SESSION_STATE.setdefault(skey, {})
-                    st0["image_ingest_pending_ts"] = time.time()
-                    st0["image_ingest_pending_token"] = ingest_token
-            imgs = await self._pdf_get_event_image_inputs(event)
+                    u0 = _user_state(st0, uid)
+                    u0["image_ingest_pending_ts"] = time.time()
+                    u0["image_ingest_pending_token"] = ingest_token
+            imgs = await self._pdf_get_event_image_inputs(event, defer_errors=True)
             now_ts = time.time()
             raw = (getattr(event, "message_str", "") or "").strip()
+            # /pdf、/spdf 等命令消息不参与孤图 pending 的建立/清理（由命令自己消费孤图）
+            is_command_msg = bool(re.match(r"^\s*/?(pdf|spdf|md)\b", raw, flags=re.I))
 
             is_private = self._is_private_chat(event)
             reply_id = self._extract_reply_msg_id(event)
@@ -578,16 +623,23 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             async with self._state_lock:
                 state = MATH_SESSION_STATE.setdefault(skey, {})
                 state["last_active_ts"] = now_ts
+                ust = _user_state(state, uid)
 
-                # --- 图片消息：记录图片；私聊纯图片则进入“待引用”状态 ---
+                # --- 图片消息：记录图片；纯图片则进入“待引用/待命令”状态 ---
                 if imgs:
+                    # 会话级（旧字段，答疑主流程仍在用）
                     state["last_image_urls"] = imgs
                     state["last_image_ts"] = now_ts
                     state["last_had_img"] = True
+                    # 用户级（/pdf、/spdf 按用户隔离，防止群里互相覆盖）
+                    ust["last_image_urls"] = imgs
+                    ust["last_image_ts"] = now_ts
                     if not raw:
                         state["last_problem"] = "[图片题目]"
+                        ust["last_problem"] = "[图片题目]"
                     if cur_mid:
                         state["last_image_msg_id"] = cur_mid
+                        ust["last_image_msg_id"] = cur_mid
                         image_map = state.setdefault("image_ctx_map", {})
                         if isinstance(image_map, dict):
                             image_map[str(cur_mid)] = list(imgs)
@@ -599,23 +651,27 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                                     break
 
                     if not raw:
-                        # 只发图片：进入“待引用”状态，等待用户“引用该图片 + 文字”再答疑
+                        # 只发图片：进入“待引用/待命令”状态
                         state["pending_image_only"] = True
                         if cur_mid:
                             state["pending_image_msg_id"] = cur_mid
                         state["pending_image_ts"] = now_ts
+                        ust["pending_image_only"] = True
+                        ust["pending_image_msg_id"] = cur_mid or ""
+                        ust["pending_image_ts"] = now_ts
+                        ust["pending_image_urls"] = imgs
                     else:
                         # 非“纯图片待引用”场景：清掉 pending，并正常记录 last_problem
-                        state.pop("pending_image_only", None)
-                        state.pop("pending_image_msg_id", None)
-                        state.pop("pending_image_ts", None)
-                        if raw:
-                            state["last_problem"] = raw
-                        else:
-                            state["last_problem"] = "[图片题目]"
+                        for st_ in (state, ust):
+                            st_.pop("pending_image_only", None)
+                            st_.pop("pending_image_msg_id", None)
+                            st_.pop("pending_image_ts", None)
+                        ust.pop("pending_image_urls", None)
+                        state["last_problem"] = raw
+                        ust["last_problem"] = raw
 
-                # --- 非图片消息：如果上一条是“私聊纯图片待引用”，则仅在回复/引用它时保留 pending ---
-                else:
+                # --- 非图片消息：上一条是“纯图片待引用”时，仅在回复/引用它或发命令时保留 pending ---
+                elif not is_command_msg:
                     if state.get("pending_image_only"):
                         pid = str(state.get("pending_image_msg_id") or "").strip()
                         # 若本条不是“引用 pending 图片”的消息，则认为用户已开始新话题，清掉 pending
@@ -623,6 +679,13 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                             state.pop("pending_image_only", None)
                             state.pop("pending_image_msg_id", None)
                             state.pop("pending_image_ts", None)
+                    if ust.get("pending_image_only"):
+                        pid = str(ust.get("pending_image_msg_id") or "").strip()
+                        if not (reply_id and ((not pid) or (str(reply_id).strip() == pid))):
+                            ust.pop("pending_image_only", None)
+                            ust.pop("pending_image_msg_id", None)
+                            ust.pop("pending_image_ts", None)
+                            ust.pop("pending_image_urls", None)
 
             # 私聊纯图片：直接 stop_event，阻止默认“收到就回”行为；群聊仍交给平台/其它逻辑处理
             if is_private and imgs and (not raw):
@@ -638,9 +701,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 try:
                     async with self._state_lock:
                         st1 = MATH_SESSION_STATE.get(skey)
-                        if st1 is not None and st1.get("image_ingest_pending_token") == ingest_token:
-                            st1.pop("image_ingest_pending_ts", None)
-                            st1.pop("image_ingest_pending_token", None)
+                        if st1 is not None:
+                            u1 = _user_state(st1, uid)
+                            if u1.get("image_ingest_pending_token") == ingest_token:
+                                u1.pop("image_ingest_pending_ts", None)
+                                u1.pop("image_ingest_pending_token", None)
                 except Exception:
                     pass
 
@@ -655,9 +720,9 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             pass
         return False
 
-    async def _wait_image_ingest_settled(self, skey: str, state: Dict[str, Any],
+    async def _wait_image_ingest_settled(self, skey: str, uid: str, state: Dict[str, Any],
                                          max_wait_sec: float = 20.0) -> Dict[str, Any]:
-        """若该会话有图片消息正在入库（快照下载中），等它写完状态后重读，返回最新 state。
+        """若“本人”有图片消息正在入库（快照下载中），等它写完状态后重读，返回最新 state。
 
         用于 /pdf、/spdf：用户常常“先发图、紧接着发命令”，图片快照可能耗时数秒，
         不等待的话命令会读到旧的 last_image_urls，把上一题的图拿去解答。
@@ -665,7 +730,8 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         deadline = time.time() + max(0.0, float(max_wait_sec))
         waited = False
         while True:
-            ts = float(state.get("image_ingest_pending_ts", 0) or 0)
+            ust = state.get("users", {}).get(str(uid or "unknown"), {}) if isinstance(state.get("users"), dict) else {}
+            ts = float(ust.get("image_ingest_pending_ts", 0) or 0)
             # 无入库中标记，或标记已僵死（超过快照超时上限很多，视为异常残留）
             if (not ts) or (time.time() - ts) > 60:
                 break
@@ -679,6 +745,207 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if waited:
             logger.info("检测到图片正在入库，已等待其完成后再选取图片")
         return state
+
+    # ------------------------- /pdf、/spdf：追问线程（引用即追问） -------------------------
+    async def _pdf_resolve_inputs(self, event: AstrMessageEvent, arg: str,
+                                  current_images: List[str], cmd_label: str) -> Dict[str, Any]:
+        """按“引用即追问”协议解析 /pdf、/spdf 的输入。
+
+        判定优先级：
+        1. 消息自带图片 -> 用该图；若同时引用了某线程 PDF 则作为该线程追问，否则开新题
+        2. 本人时间窗内单发的“孤图” -> 视同随命令携带（可与引用叠加，消费后清除）
+        3. 引用了某份 PDF -> 追问该线程
+        4. 纯文字 -> 一律新题
+        5. 裸命令 -> 回溯本人上一张图
+        返回 dict：text, images, thread_id, thread_ctx, notices, error
+        """
+        skey = _get_session_key(event)
+        uid = _get_sender_uid(event)
+        res: Dict[str, Any] = {
+            "skey": skey, "uid": uid,
+            "text": "", "images": [], "thread_id": "", "thread_ctx": "",
+            "notices": [], "error": "",
+        }
+
+        async with self._state_lock:
+            state = MATH_SESSION_STATE.get(skey, {}).copy()
+        if not current_images:
+            state = await self._wait_image_ingest_settled(skey, uid, state)
+        ust = state.get("users", {}).get(uid, {}) if isinstance(state.get("users"), dict) else {}
+
+        now_ts = time.time()
+        reply_id = self._extract_reply_msg_id(event)
+        arg = (arg or "").strip()
+        no_image_requested = bool(re.search(r"(不用|不使用|别|不要).{0,6}(图片|图|图像)", arg))
+
+        # --- 引用定位：图片消息 / PDF 线程 ---
+        reply_image_inputs: List[str] = []
+        thread_id = ""
+        if reply_id:
+            image_map = state.get("image_ctx_map", {})
+            if isinstance(image_map, dict):
+                cached = image_map.get(str(reply_id)) or []
+                if isinstance(cached, list):
+                    reply_image_inputs = [str(x) for x in cached if str(x or "").strip()]
+            mp = state.get("pdf_msg_to_thread", {})
+            if isinstance(mp, dict):
+                thread_id = str(mp.get(str(reply_id)) or "").strip()
+            if (not thread_id) and (not reply_image_inputs):
+                # 兜底：适配器拿不到精确消息映射，但被引用消息看起来是 PDF -> 本人最近线程
+                if self._reply_msg_has_pdf_hint(event):
+                    thread_id = str(ust.get("last_thread_id") or "").strip()
+
+        # --- 孤图（本人、时间窗内）---
+        pending_images: List[str] = []
+        pending_window = int(self._cfg("pdf_pending_image_window_sec", 300) or 300)
+        if ust.get("pending_image_only"):
+            p_ts = float(ust.get("pending_image_ts", 0) or 0)
+            if p_ts and (now_ts - p_ts) <= max(10, pending_window):
+                cand = ust.get("pending_image_urls") or ust.get("last_image_urls") or []
+                if isinstance(cand, list):
+                    pending_images = [str(x) for x in cand if str(x or "").strip()]
+
+        # --- 组装图片输入 ---
+        images: List[str] = []
+        consumed_pending = False
+        if current_images:
+            images = list(current_images)
+        elif reply_image_inputs:
+            images = list(reply_image_inputs)
+        elif pending_images and (not no_image_requested):
+            images = list(pending_images)
+            consumed_pending = True
+
+        # --- 线程上下文 ---
+        thread_ctx = ""
+        if thread_id:
+            threads = state.get("pdf_threads", {})
+            th = threads.get(thread_id) if isinstance(threads, dict) else None
+            if isinstance(th, dict):
+                thread_ctx = _pdf_serialize_thread(th)
+                # 追问时自动带上题根图片（原题是图片题的场景）
+                root_imgs = th.get("root_image_refs") or []
+                if isinstance(root_imgs, list) and root_imgs:
+                    have = set(images)
+                    images = images + [str(x) for x in root_imgs if str(x or "").strip() and str(x) not in have]
+            else:
+                thread_id = ""
+                res["notices"].append("⚠️ 被引用的解答已过期（会话状态被清理），将按新题目处理")
+
+        # --- 判定文字输入 ---
+        if arg:
+            res["text"] = arg
+        elif images and (not thread_id):
+            res["text"] = ""  # 图片新题
+        elif thread_id:
+            res["text"] = ""  # 引用了 PDF 但没写文字：让模型基于线程继续/细化
+        elif not images:
+            # 裸命令：回溯本人上一张图 / 上一题文字
+            u_last_imgs = ust.get("last_image_urls") or []
+            u_last_ts = float(ust.get("last_image_ts", 0) or 0)
+            u_last_problem = str(ust.get("last_problem") or "").strip()
+            valid_sec = int(self._cfg("last_image_valid_sec", 3600) or 3600)
+            if isinstance(u_last_imgs, list) and u_last_imgs:
+                if (now_ts - u_last_ts) > valid_sec:
+                    res["notices"].append(f"⚠️ 你上一张图片可能已过期，建议重新发送图片 + /{cmd_label}")
+                images = [str(x) for x in u_last_imgs if str(x or "").strip()]
+                res["text"] = u_last_problem if u_last_problem != "[图片题目]" else ""
+            elif u_last_problem and u_last_problem != "[图片题目]":
+                res["text"] = u_last_problem
+            else:
+                res["error"] = f"请发送 /{cmd_label} 题目文字，或发送包含题目的图片 + /{cmd_label}"
+                return res
+
+        res["images"] = images
+        res["thread_id"] = thread_id
+        res["thread_ctx"] = thread_ctx
+
+        # --- 消费孤图：用掉即清除 ---
+        if consumed_pending:
+            try:
+                async with self._state_lock:
+                    st = MATH_SESSION_STATE.get(skey)
+                    if st is not None:
+                        u = _user_state(st, uid)
+                        u.pop("pending_image_only", None)
+                        u.pop("pending_image_msg_id", None)
+                        u.pop("pending_image_ts", None)
+                        u.pop("pending_image_urls", None)
+            except Exception:
+                pass
+        return res
+
+    async def _pdf_register_thread_result(self, skey: str, uid: str, thread_id: str,
+                                          problem_text: str, image_refs: List[str],
+                                          tex_src: str, sent_msg_id: Optional[str]):
+        """PDF 生成成功后：把本轮写入追问线程，并注册消息 ID 供后续引用定位。"""
+        try:
+            async with self._state_lock:
+                st = MATH_SESSION_STATE.setdefault(skey, {})
+                now_ts = time.time()
+                st["last_active_ts"] = now_ts
+                threads = st.setdefault("pdf_threads", {})
+                if not isinstance(threads, dict):
+                    threads = {}
+                    st["pdf_threads"] = threads
+
+                th = threads.get(thread_id) if thread_id else None
+                if not isinstance(th, dict):
+                    thread_id = uuid.uuid4().hex
+                    th = {
+                        "owner_uid": uid,
+                        "created_ts": now_ts,
+                        "root_problem_text": (problem_text or "").strip(),
+                        "root_image_refs": list(image_refs or []),
+                        "turns": [],
+                    }
+                    threads[thread_id] = th
+                th["updated_ts"] = now_ts
+                turns = th.setdefault("turns", [])
+                if isinstance(turns, list):
+                    turns.append({"role": "user", "text": (problem_text or "").strip()})
+                    if tex_src:
+                        turns.append({"role": "assistant", "text": tex_src})
+                    while len(turns) > 100:  # 防失控硬上限
+                        turns.pop(0)
+
+                # 线程 LRU：最多 30 个
+                while len(threads) > 30:
+                    try:
+                        oldest = min(threads, key=lambda k: float(threads[k].get("updated_ts", 0) or 0))
+                        threads.pop(oldest)
+                    except Exception:
+                        break
+
+                if sent_msg_id:
+                    mp = st.setdefault("pdf_msg_to_thread", {})
+                    if isinstance(mp, dict):
+                        mp[str(sent_msg_id)] = thread_id
+                        while len(mp) > 200:
+                            try:
+                                mp.pop(next(iter(mp)))
+                            except Exception:
+                                break
+
+                # 用户级“上一题/上一张图/最近线程”
+                ust = _user_state(st, uid)
+                ust["last_thread_id"] = thread_id
+                clean = (problem_text or "").strip()
+                ust["last_problem"] = clean if clean else ("[图片题目]" if image_refs else "")
+                if image_refs:
+                    ust["last_image_urls"] = list(image_refs)
+                    ust["last_image_ts"] = now_ts
+                # 会话级旧字段同步（答疑主流程/日报仍在用）
+                if clean:
+                    st["last_problem"] = clean
+                elif image_refs:
+                    st["last_problem"] = "[图片题目]"
+                st["last_had_img"] = bool(image_refs)
+                if image_refs:
+                    st["last_image_urls"] = list(image_refs)
+                    st["last_image_ts"] = now_ts
+        except Exception:
+            logger.warning("PDF 线程状态写入失败", exc_info=True)
 
     # ------------------------- Reply/引用消息识别（用于 PDF 二次追问） -------------------------
     def _extract_reply_msg_id(self, event: AstrMessageEvent) -> Optional[str]:
@@ -1178,7 +1445,9 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if not user_id:
             yield event.plain_result("无法获取用户ID")
             return
-        USER_PREFERENCES[user_id] = "pc"
+        if not set_user_mode_preference(user_id, "pc"):
+            yield event.plain_result("无法保存用户渲染模式")
+            return
         yield event.plain_result("✅ 已切换为 PC 模式 (A4分页)")
 
     # === 快捷指令 2: Mobile/PE 模式 ===
@@ -1188,7 +1457,9 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if not user_id:
             yield event.plain_result("无法获取用户ID")
             return
-        USER_PREFERENCES[user_id] = "mobile"
+        if not set_user_mode_preference(user_id, "mobile"):
+            yield event.plain_result("无法保存用户渲染模式")
+            return
         yield event.plain_result("✅ 已切换为 手机 模式 (长截屏)")
 
 
@@ -1213,6 +1484,9 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             st.pop("last_pdf_context", None)
             st.pop("last_pdf_msg_id", None)
             st.pop("pdf_ctx_map", None)
+            st.pop("pdf_threads", None)
+            st.pop("pdf_msg_to_thread", None)
+            st.pop("users", None)
 
         # 2) 清除 AstrBot 框架层面的对话上下文（多种方式兼容不同版本）
         umo = getattr(event, "unified_msg_origin", None) or ""
@@ -1345,6 +1619,36 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if msg:
             yield event.plain_result(msg)
 
+    @filter.command("pdf主题")
+    async def cmd_pdf_theme(self, event: AstrMessageEvent, theme: str = ""):
+        async for result in self._pdf_theme_command(event, theme):
+            yield result
+
+    @filter.command("pdf主题概览")
+    async def cmd_pdf_theme_overview(self, event: AstrMessageEvent):
+        async for result in self._pdf_theme_overview_command(event):
+            yield result
+
+    @filter.command("pdf统计")
+    async def cmd_pdf_usage(self, event: AstrMessageEvent):
+        try:
+            message = await self._usage_handle_manual(event)
+        except Exception as e:
+            logger.warning(f"PDF 统计图生成失败: {type(e).__name__}")
+            message = "统计图暂时生成失败，请稍后重试。"
+        if message:
+            yield event.plain_result(message)
+
+    @filter.command("md")
+    @filter.custom_filter(MarkdownMixedMessageFilter)
+    async def cmd_md(self, event: AstrMessageEvent):
+        work = self._md_command(event)
+        try:
+            async for result in work:
+                yield result
+        finally:
+            await work.aclose()
+
     # === 快捷指令 3: 生成 PDF 解答 ===
     @filter.command("pdf")
     async def cmd_pdf(self, event: AstrMessageEvent):
@@ -1358,130 +1662,67 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if m:
             arg = (m.group(1) or "").strip()
 
-        current_images = await self._pdf_get_event_image_inputs(event)
-        skey = _get_session_key(event)
-
-        async with self._state_lock:
-            state = MATH_SESSION_STATE.get(skey, {}).copy()
-
-        # 本条命令没带图时，若有刚发的图片正在入库（快照下载中），等它写完再取，
-        # 避免拿到上一题的旧图。
-        if not current_images:
-            state = await self._wait_image_ingest_settled(skey, state)
-
-        last_problem_text = (state.get("last_problem", "") or "").strip()
-        last_images = state.get("last_image_urls", [])
-        last_image_ts = float(state.get("last_image_ts", 0) or 0)
-        reply_id = self._extract_reply_msg_id(event)
-        reply_image_inputs: List[str] = []
-        if reply_id:
-            try:
-                image_map = state.get("image_ctx_map", {})
-                if isinstance(image_map, dict):
-                    cached = image_map.get(str(reply_id)) or []
-                    if isinstance(cached, list):
-                        reply_image_inputs = [str(x) for x in cached if str(x or "").strip()]
-                if (not reply_image_inputs) and str(reply_id) == str(state.get("last_image_msg_id", "") or "").strip():
-                    cached = state.get("last_image_urls") or []
-                    if isinstance(cached, list):
-                        reply_image_inputs = [str(x) for x in cached if str(x or "").strip()]
-            except Exception:
-                reply_image_inputs = []
-
-        final_text_input = ""
-        final_image_inputs: List[str] = []
-
-        now_ts = time.time()
-        valid_sec = int(self._cfg("last_image_valid_sec", 3600) or 3600)
-        is_last_img_likely_valid = (now_ts - last_image_ts) <= valid_sec
-
-        if current_images:
-            final_image_inputs = current_images
-            final_text_input = arg
-        elif reply_image_inputs:
-            # 精确引用了某条图片消息：优先使用该图片，不依赖 smart 文本判断。
-            final_image_inputs = reply_image_inputs
-            final_text_input = arg
-        elif arg:
-            final_text_input = arg
-
-            # 文字 + 上一张图（追问场景）
-            # 新逻辑：默认 smart —— 仅在文本看起来是在追问/引用图片时才携带上一张图。
-            reuse_mode = str(self._cfg("pdf_reuse_last_image_with_text_mode", "smart") or "smart").lower().strip()
-            followup_max_len = int(self._cfg("pdf_followup_text_max_len", 40) or 40)
-
-            allow_reuse = False
-            if last_images and is_last_img_likely_valid:
-                # 只有“上一题确实是图片题”时才考虑复用（避免跨题串图）
-                last_had_img = bool(state.get("last_had_img", False))
-                last_img_context = last_had_img or (last_problem_text == "[图片题目]")
-                if last_img_context:
-                    pending_mid = str(state.get("pending_image_msg_id") or state.get("last_image_msg_id") or "").strip()
-                    if reply_id and ((not pending_mid) or (str(reply_id).strip() == pending_mid)):
-                        allow_reuse = True
-                    elif reuse_mode == "always":
-                        allow_reuse = True
-                    elif reuse_mode == "never":
-                        allow_reuse = False
-                    else:
-                        # smart 模式：出现明显“追问/引用图片”的信号 or 文本较短且不像新题
-                        t = (arg or "").strip()
-                        # 用户明确要求“不用图片”
-                        if re.search(r"(不用|不使用|别|不要).{0,6}(图片|图|图像)", t):
-                            allow_reuse = False
-                        elif re.search(
-                                r"(如图|见图|图中|图片|上题|上一题|刚才|继续|小问|第\s*(?:\d+|[一二两三四五六七八九十])\s*问|\(\s*\d+\s*\))",
-                                t):
-                            allow_reuse = True
-                        elif len(t) <= max(10, followup_max_len) and (not _is_math_question(t)):
-                            allow_reuse = True
-                        else:
-                            allow_reuse = False
-
-            if allow_reuse:
-                final_image_inputs = last_images
-        elif last_images:
-            # 只发 /pdf：回溯上一张图
-            if not is_last_img_likely_valid:
-                yield event.plain_result("⚠️ 上一张图片可能已过期（链接可能失效），建议重新发送图片 + /pdf")
-                # 仍允许用户“试一试”：很多平台 URL 实际更久
-            final_image_inputs = last_images
-            final_text_input = last_problem_text if last_problem_text != "[图片题目]" else ""
-        elif last_problem_text and last_problem_text != "[图片题目]":
-            final_text_input = last_problem_text
-        else:
-            yield event.plain_result("请发送 /pdf 题目文字，或发送包含题目的图片 + /pdf")
+        try:
+            current_images = await self._pdf_get_event_image_inputs(event)
+        except PdfImageInputError as e:
+            yield event.plain_result("❌ PDF 生成已暂停：" + str(e))
             return
 
-        # === 随机等待提示语 Start ===
-        yield event.plain_result("正在生成中...\n你知道吗？" + _get_daily_math_fact())
-        # === 随机等待提示语 End ===
+        # “引用即追问”协议：解析文字/图片/线程
+        resolved = await self._pdf_resolve_inputs(event, arg, current_images, cmd_label="pdf")
+        if resolved.get("error"):
+            yield event.plain_result(resolved["error"])
+            return
+        for n in resolved.get("notices") or []:
+            yield event.plain_result(n)
 
-        # 若用户“引用/回复”了机器人之前发出的 PDF 文件消息：尽量把对应 PDF 的 LaTeX 源码取出来，
-        # 作为本次 /pdf 追问的参考上下文（避免模型遗忘上一份 PDF 的细节）。
-        ref_pdf_ctx = ""
-        if reply_id:
+        stats = None
+        token = None
+        try:
+            stats = self._pdf_get_task_stats()
+            scope = task_scope(event)
+            token, total, active = stats.begin(scope)
+            resolved["_usage_token"] = token
+            notice = waiting_notice(total, active)
+            if self._is_private_chat(event):
+                notice = notice.replace("本群", "本会话", 1)
+        except Exception as e:
+            # Optional telemetry must never prevent a PDF from being generated.
+            logger.warning(f"[mathsolve] PDF 任务统计暂不可用: {type(e).__name__}")
+            notice = "⏳ 正在生成中，请稍候……"
+
+        work = None
+        try:
+            yield event.plain_result(notice)
+            work = self._pdf_generate_and_send(event, resolved)
+            async for result in work:
+                yield result
+        finally:
             try:
-                mp = state.get("pdf_ctx_map", {})
-                if isinstance(mp, dict):
-                    ref_pdf_ctx = (mp.get(str(reply_id)) or "").strip()
-            except Exception:
-                ref_pdf_ctx = ""
+                if work is not None:
+                    await work.aclose()
+            finally:
+                if stats is not None and token is not None:
+                    try:
+                        stats.finish(token)
+                    except Exception as e:
+                        logger.warning(f"[mathsolve] PDF 任务统计结束登记失败: {type(e).__name__}")
 
-            # 兜底：没有精确 message_id 映射时，弱绑定到“最近一次 PDF”
-            if not ref_pdf_ctx:
-                last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
-                if last_pdf_ctx:
-                    last_mid = str(state.get("last_pdf_msg_id", "") or "").strip()
-                    if last_mid:
-                        if str(reply_id) == last_mid:
-                            ref_pdf_ctx = last_pdf_ctx
-                        else:
-                            # 若适配器能拿到被引用消息内容且确实包含 PDF，则允许兜底
-                            if self._reply_msg_has_pdf_hint(event):
-                                ref_pdf_ctx = last_pdf_ctx
-                    else:
-                        ref_pdf_ctx = last_pdf_ctx
+    def _pdf_get_task_stats(self):
+        stats = getattr(self, "_pdf_task_stats", None)
+        if stats is None:
+            stats = PdfTaskStats(os.path.join(self.DATA_DIR, "pdf_task_stats.sqlite3"))
+            self._pdf_task_stats = stats
+        return stats
+
+    async def _pdf_generate_and_send(self, event, resolved):
+        """Existing generation/send flow; task lifetime is managed by cmd_pdf."""
+        skey = resolved["skey"]
+        uid = resolved["uid"]
+        final_text_input = resolved["text"]
+        final_image_inputs: List[str] = resolved["images"]
+        thread_id = resolved["thread_id"]
+        ref_pdf_ctx = resolved["thread_ctx"]
 
         # 标记：本次 LLM 调用用于 /pdf 生成，避免其它 on_llm_request 逻辑误注入
         try:
@@ -1491,37 +1732,18 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         try:
             pdf_path, fname, generated_tex_src = await self._solve_math_to_pdf(
+                _usage_token=resolved.get("_usage_token"),
                 problem_text=final_text_input,
                 event=event,
                 image_urls=final_image_inputs,
                 ref_pdf_latex=ref_pdf_ctx,
             )
-
-            # 保存 PDF 上下文 + 更新“上一题/上一张图”状态
-            async with self._state_lock:
-                st = MATH_SESSION_STATE.setdefault(skey, {})
-                now_ts = time.time()
-                st["last_active_ts"] = now_ts
-                if generated_tex_src:
-                    st["last_pdf_context"] = generated_tex_src
-
-                # 记录更干净的“上一题”（去掉 /pdf 前缀）
-                clean_last = (final_text_input or "").strip()
-                if clean_last:
-                    clean_last = re.sub(r"^\s*/?pdf\b", "", clean_last, flags=re.I).strip()
-                if clean_last:
-                    st["last_problem"] = clean_last
-                else:
-                    # 没有文字则标记为图片题
-                    if final_image_inputs:
-                        st["last_problem"] = "[图片题目]"
-                st["last_had_img"] = bool(final_image_inputs)
-
-                if final_image_inputs:
-                    st["last_image_urls"] = list(final_image_inputs)
-                    st["last_image_ts"] = now_ts
         except Exception as e:
             err = str(e)
+            if isinstance(e, PdfImageInputError):
+                logger.warning(f"PDF 图片输入失败: {err}")
+                yield event.plain_result("❌ PDF 生成已暂停：" + err)
+                return
             try:
                 log_snip = (self._last_texlive_log or "").strip()
                 if log_snip:
@@ -1561,13 +1783,13 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             yield event.plain_result("当前 AstrBot 版本缺少文件消息组件，无法发送 PDF")
             return
 
-        uid = event.get_sender_id()
+        at_uid = event.get_sender_id()
         chain = []
 
         # === 修复开始：仅在非私聊（群聊）场景下才添加 @ ===
         is_private = self._is_private_chat(event)
-        if uid and (not is_private):
-            chain.append(Comp.At(qq=uid))
+        if at_uid and (not is_private):
+            chain.append(Comp.At(qq=at_uid))
         # === 修复结束 ===
 
         # 优先用 event.send 发送（若适配器支持，可拿到 message_id，便于后续“引用这条 PDF 消息”追问）。
@@ -1577,24 +1799,13 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             yield event.plain_result(send_error_msg)
             return
 
-        # 若成功拿到 message_id，则把本次 PDF 的 LaTeX 源码与该消息绑定，供用户引用追问
-        if sent_msg_id and generated_tex_src:
-            try:
-                async with self._state_lock:
-                    st = MATH_SESSION_STATE.setdefault(skey, {})
-                    mp = st.setdefault("pdf_ctx_map", {})
-                    if isinstance(mp, dict):
-                        mp[str(sent_msg_id)] = generated_tex_src
-                        # 控制缓存大小：最多保留 30 条（FIFO）
-                        max_keep = 30
-                        while len(mp) > max_keep:
-                            try:
-                                mp.pop(next(iter(mp)))
-                            except Exception:
-                                break
-                    st["last_pdf_msg_id"] = str(sent_msg_id)
-            except Exception:
-                pass
+        # 把本轮问答写入追问线程，并把发出的 PDF 消息 ID 绑定到线程，供用户引用追问
+        clean_text = re.sub(r"^\s*/?pdf\b", "", (final_text_input or ""), flags=re.I).strip()
+        await self._pdf_register_thread_result(
+            skey=skey, uid=uid, thread_id=thread_id,
+            problem_text=clean_text, image_refs=final_image_inputs,
+            tex_src=generated_tex_src or "", sent_msg_id=sent_msg_id,
+        )
 
         await self._daily_report_record_answer(
             event=event,
@@ -1608,9 +1819,13 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
     # === 快捷指令 4: DeepThink 多角色迭代生成 PDF 解答（/spdf） ===
     @filter.command("spdf")
+    @limited_spdf_command
     async def cmd_spdf(self, event: AstrMessageEvent):
-        if not self._cfg("enable_spdf_output", True):
-            yield event.plain_result("SPDF 输出未启用")
+        started_at = _time.monotonic()
+        try:
+            admission = self._spdf_require_access(event)
+        except SpdfAccessDenied as e:
+            yield event.plain_result(str(e))
             return
 
         raw = (getattr(event, "message_str", "") or "").strip()
@@ -1619,115 +1834,28 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if m:
             arg = (m.group(1) or "").strip()
 
-        current_images = _get_event_images(event)
-        skey = _get_session_key(event)
-
-        async with self._state_lock:
-            state = MATH_SESSION_STATE.get(skey, {}).copy()
-
-        # 同 /pdf：命令没带图时等待正在入库的新图，避免拿到上一题的旧图
-        if not current_images:
-            state = await self._wait_image_ingest_settled(skey, state)
-
-        last_problem_text = (state.get("last_problem", "") or "").strip()
-        last_images = state.get("last_image_urls", [])
-        last_image_ts = float(state.get("last_image_ts", 0) or 0)
-        reply_id = self._extract_reply_msg_id(event)
-        reply_image_inputs: List[str] = []
-        if reply_id:
-            try:
-                image_map = state.get("image_ctx_map", {})
-                if isinstance(image_map, dict):
-                    cached = image_map.get(str(reply_id)) or []
-                    if isinstance(cached, list):
-                        reply_image_inputs = [str(x) for x in cached if str(x or "").strip()]
-                if (not reply_image_inputs) and str(reply_id) == str(state.get("last_image_msg_id", "") or "").strip():
-                    cached = state.get("last_image_urls") or []
-                    if isinstance(cached, list):
-                        reply_image_inputs = [str(x) for x in cached if str(x or "").strip()]
-            except Exception:
-                reply_image_inputs = []
-
-        final_text_input = ""
-        final_image_inputs: List[str] = []
-
-        now_ts = time.time()
-        valid_sec = int(self._cfg("last_image_valid_sec", 3600) or 3600)
-        is_last_img_likely_valid = (now_ts - last_image_ts) <= valid_sec
-
-        if current_images:
-            final_image_inputs = current_images
-            final_text_input = arg
-        elif reply_image_inputs:
-            final_image_inputs = reply_image_inputs
-            final_text_input = arg
-        elif arg:
-            final_text_input = arg
-
-            # 文字 + 上一张图（追问场景）
-            reuse_mode = str(self._cfg("pdf_reuse_last_image_with_text_mode", "smart") or "smart").lower().strip()
-            followup_max_len = int(self._cfg("pdf_followup_text_max_len", 40) or 40)
-
-            allow_reuse = False
-            if last_images and is_last_img_likely_valid:
-                last_had_img = bool(state.get("last_had_img", False))
-                last_img_context = last_had_img or (last_problem_text == "[图片题目]")
-                if last_img_context:
-                    pending_mid = str(state.get("pending_image_msg_id") or state.get("last_image_msg_id") or "").strip()
-                    if reply_id and ((not pending_mid) or (str(reply_id).strip() == pending_mid)):
-                        allow_reuse = True
-                    elif reuse_mode == "always":
-                        allow_reuse = True
-                    elif reuse_mode == "never":
-                        allow_reuse = False
-                    else:
-                        t = (arg or "").strip()
-                        if re.search(r"(不用|不使用|别|不要).{0,6}(图片|图|图像)", t):
-                            allow_reuse = False
-                        elif re.search(
-                                r"(如图|见图|图中|图片|上题|上一题|刚才|继续|小问|第\s*(?:\d+|[一二两三四五六七八九十])\s*问|\(\s*\d+\s*\))",
-                                t):
-                            allow_reuse = True
-                        elif len(t) <= max(10, followup_max_len) and (not _is_math_question(t)):
-                            allow_reuse = True
-                        else:
-                            allow_reuse = False
-
-            if allow_reuse:
-                final_image_inputs = last_images
-        elif last_images:
-            if not is_last_img_likely_valid:
-                yield event.plain_result("⚠️ 上一张图片可能已过期（链接可能失效），建议重新发送图片 + /spdf")
-            final_image_inputs = last_images
-            final_text_input = last_problem_text if last_problem_text != "[图片题目]" else ""
-        elif last_problem_text and last_problem_text != "[图片题目]":
-            final_text_input = last_problem_text
-        else:
-            yield event.plain_result("请发送 /spdf 题目文字，或发送包含题目的图片 + /spdf")
+        try:
+            current_images = await self._pdf_get_event_image_inputs(event)
+        except PdfImageInputError as e:
+            yield event.plain_result("❌ Deepthink 生成已暂停：" + str(e))
             return
 
-        yield event.plain_result("正在生成中...\n你知道吗？" + _get_daily_math_fact())
+        # “引用即追问”协议：解析文字/图片/线程（与 /pdf 同规则）
+        resolved = await self._pdf_resolve_inputs(event, arg, current_images, cmd_label="spdf")
+        if resolved.get("error"):
+            yield event.plain_result(resolved["error"])
+            return
+        for n in resolved.get("notices") or []:
+            yield event.plain_result(n)
 
-        ref_pdf_ctx = ""
-        if reply_id:
-            try:
-                mp = state.get("pdf_ctx_map", {})
-                if isinstance(mp, dict):
-                    ref_pdf_ctx = (mp.get(str(reply_id)) or "").strip()
-            except Exception:
-                ref_pdf_ctx = ""
-            if not ref_pdf_ctx:
-                last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
-                if last_pdf_ctx:
-                    last_mid = str(state.get("last_pdf_msg_id", "") or "").strip()
-                    if last_mid:
-                        if str(reply_id) == last_mid:
-                            ref_pdf_ctx = last_pdf_ctx
-                        else:
-                            if self._reply_msg_has_pdf_hint(event):
-                                ref_pdf_ctx = last_pdf_ctx
-                    else:
-                        ref_pdf_ctx = last_pdf_ctx
+        skey = resolved["skey"]
+        uid = resolved["uid"]
+        final_text_input = resolved["text"]
+        final_image_inputs: List[str] = resolved["images"]
+        thread_id = resolved["thread_id"]
+        ref_pdf_ctx = resolved["thread_ctx"]
+
+        yield event.plain_result(spdf_waiting_notice(self, event))
 
         try:
             event.set_extra("md2img_pdf_generation", True)
@@ -1740,31 +1868,15 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 event=event,
                 image_urls=final_image_inputs,
                 ref_pdf_latex=ref_pdf_ctx,
+                _admission=admission,
             )
-
-            async with self._state_lock:
-                st = MATH_SESSION_STATE.setdefault(skey, {})
-                now_ts = time.time()
-                st["last_active_ts"] = now_ts
-                if generated_tex_src:
-                    st["last_pdf_context"] = generated_tex_src
-
-                clean_last = (final_text_input or "").strip()
-                if clean_last:
-                    clean_last = re.sub(r"^\s*/?spdf\b", "", clean_last, flags=re.I).strip()
-                if clean_last:
-                    st["last_problem"] = clean_last
-                else:
-                    if final_image_inputs:
-                        st["last_problem"] = "[图片题目]"
-                st["last_had_img"] = bool(final_image_inputs)
-
-                if final_image_inputs:
-                    st["last_image_urls"] = list(final_image_inputs)
-                    st["last_image_ts"] = now_ts
         except Exception as e:
             err = str(e)
             # 先记录日志（若有编译日志则一并打印，便于排查）
+            if isinstance(e, PdfImageInputError):
+                logger.warning(f"SPDF 图片输入失败: {err}")
+                yield event.plain_result("❌ Deepthink 生成已暂停：" + err)
+                return
             try:
                 log_snip = (self._last_texlive_log or "").strip()
                 if log_snip:
@@ -1838,12 +1950,12 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             yield event.plain_result("当前 AstrBot 版本缺少文件消息组件，无法发送 PDF")
             return
 
-        uid = event.get_sender_id()
+        at_uid = event.get_sender_id()
         chain = []
 
         is_private = self._is_private_chat(event)
-        if uid and (not is_private):
-            chain.append(Comp.At(qq=uid))
+        if at_uid and (not is_private):
+            chain.append(Comp.At(qq=at_uid))
 
         sent_msg_id: Optional[str] = None
         sent_msg_id, send_error_msg = await self._send_pdf_file_component(event, Comp, chain, pdf_path, fname, label="SPDF")
@@ -1851,22 +1963,19 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             yield event.plain_result(send_error_msg)
             return
 
-        if sent_msg_id and generated_tex_src:
-            try:
-                async with self._state_lock:
-                    st = MATH_SESSION_STATE.setdefault(skey, {})
-                    mp = st.setdefault("pdf_ctx_map", {})
-                    if isinstance(mp, dict):
-                        mp[str(sent_msg_id)] = generated_tex_src
-                        max_keep = 30
-                        while len(mp) > max_keep:
-                            try:
-                                mp.pop(next(iter(mp)))
-                            except Exception:
-                                break
-                    st["last_pdf_msg_id"] = str(sent_msg_id)
-            except Exception:
-                pass
+        elapsed_minutes = max(0.0, _time.monotonic() - started_at) / 60.0
+        yield event.plain_result(f"✅ Deepthink 已完成，此次用时 {elapsed_minutes:.2f} 分钟。")
+        token_warning = report_warning(event)
+        if token_warning:
+            yield event.plain_result(token_warning)
+
+        # 把本轮问答写入追问线程，并把发出的 PDF 消息 ID 绑定到线程，供用户引用追问
+        clean_text = re.sub(r"^\s*/?spdf\b", "", (final_text_input or ""), flags=re.I).strip()
+        await self._pdf_register_thread_result(
+            skey=skey, uid=uid, thread_id=thread_id,
+            problem_text=clean_text, image_refs=final_image_inputs,
+            tex_src=generated_tex_src or "", sent_msg_id=sent_msg_id,
+        )
 
         await self._daily_report_record_answer(
             event=event,
@@ -1918,18 +2027,45 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
     # ---------------------------------------------------------------------
     # 数学流程：默认注入完整图文讲义提示
     # ---------------------------------------------------------------------
+    @filter.on_waiting_llm_request()
+    async def prepare_agent_image_inputs(self, event: AstrMessageEvent):
+        """普通 agent 在构建请求时就下载图片，必须在 on_llm_request 之前恢复。"""
+        try:
+            count = await self._pdf_prepare_agent_images(event)
+            req = event.get_extra("provider_request")
+            if req is not None:
+                count += await self._pdf_prepare_agent_request_images(event, req)
+            if count:
+                logger.info(f"[mathsolve] agent 构建前已固定 QQ 图片: count={count}")
+        except PdfImageInputError as e:
+            event.stop_event()
+            logger.warning(f"[mathsolve] agent 图片输入失败，已停止请求: {e}")
+            await event.send(event.plain_result("❌ 图片读取失败：已尝试刷新下载凭证，但仍无法读取。请重新上传原图后重试。"))
+
     @filter.on_llm_request()
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
-        if not self._cfg("enable_math_coach", True):
+        if event.get_extra("md2img_pdf_theme_command"):
             return
-
+        forward_status = await prepare_forward_reply_evidence(event)
+        if forward_status:
+            logger.info(f"[mathsolve] 引用转发上下文: status={forward_status}, image_allowed={image_reply_decision(event).allowed}")
+        # Quote fallbacks and prior image turns can be added during agent construction.
+        try:
+            count = await self._pdf_prepare_agent_request_images(event, req)
+            if count:
+                logger.info(f"[mathsolve] agent 请求中的 QQ 图片已固定: count={count}")
+        except PdfImageInputError as e:
+            event.stop_event()
+            logger.warning(f"[mathsolve] agent 图片上下文恢复失败，已停止请求: {e}")
+            await event.send(event.plain_result("❌ 图片读取失败：当前请求或引用上下文中的图片无法读取，请重新上传原图后重试。"))
+            return
         # /pdf 命令内部也会触发 llm_generate。此时我们不应再额外注入“解题教练”系统提示，
         # 否则可能破坏 /pdf 专用 LaTeX 输出格式，进而导致 xelatex 编译失败。
         try:
-            if event.get_extra("md2img_pdf_generation"):
+            if event.get_extra("md2img_pdf_generation") or event.get_extra("mathsolve_md_generation"):
                 # /pdf / /spdf 内部调用：避免工具注入破坏 LaTeX 输出格式或触发 tool_calls 解析问题
                 try:
-                    if bool(self._cfg("spdf_disable_tools_during_generation", True)):
+                    if event.get_extra("mathsolve_md_generation") or bool(self._cfg("spdf_disable_tools_during_generation", True)):
                         self._disable_llm_tools_in_req(req)
                 except Exception:
                     pass
@@ -1938,6 +2074,18 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
             pass
 
         user_text = (getattr(event, "message_str", "") or "").strip()
+        # Permission belongs to this user turn, never to an old math session or
+        # to Markdown/tool arguments invented by the model.
+        event.set_extra("math_flow", None)
+        event.set_extra("mathsolve_image_reply_inputs", {
+            "text": user_text, "has_image": bool(_get_event_images(event)),
+            "has_reply": bool(self._extract_reply_msg_id(event)),
+        })
+        constrain_image_tool(req, image_reply_decision(event))
+        if constrain_markdown_tool(req, event, enabled=bool(self._cfg("enable_md_output", True))):
+            return  # Explicit MD delivery must not receive the image-coach prompt.
+        if not self._cfg("enable_math_coach", True):
+            return
         plugin_kb_enabled = bool(self._cfg("enable_plugin_kb_integration", False))
         raw_kb_query = _is_kb_query(user_text)
         if raw_kb_query and not plugin_kb_enabled:
@@ -2003,10 +2151,21 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
 
         state = state_snapshot
         if used_pending_image:
+            try:
+                effective_images = await self._pdf_snapshot_image_urls(effective_images, event=event)
+            except PdfImageInputError as e:
+                event.stop_event()
+                logger.warning(f"[mathsolve] 引用图片缓存恢复失败，已停止请求: {e}")
+                await event.send(event.plain_result("❌ 引用的图片无法读取，已尝试恢复下载凭证。请重新上传原图后重试。"))
+                return
             self._attach_images_to_req(req, effective_images, replace_existing=True)
 
         # 后续逻辑统一使用 current_images（可能来自 pending）
         current_images = effective_images
+        event.set_extra("mathsolve_image_reply_inputs", {
+            "text": user_text, "has_image": bool(current_images), "has_reply": bool(reply_id),
+        })
+        image_decision = image_reply_decision(event)
 
 
         # ---------------- 对话记忆：保存问答并在本次请求前注入相似历史 ----------------
@@ -2042,23 +2201,32 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         except Exception as e:
             logger.warning(f"chat memory inject failed: {e}")
 
-        treat_img_as_math = bool(self._cfg("treat_image_as_math", True))
-        last_problem = state.get("last_problem", "")
-        last_had_img = bool(state.get("last_had_img", False))
-
         # 注入 PDF 上下文（仅在用户“引用/回复”了机器人发出的 PDF 消息时才注入，避免影响下一题）
         # reply_id 已在前面提取
         pdf_ctx_to_inject = ""
         if reply_id:
-            # 1) 优先：按“被引用消息 id -> LaTeX 源码”精确匹配
+            # 1) 优先：按“被引用消息 id -> 追问线程”精确匹配（新结构）
             try:
-                mp = state.get("pdf_ctx_map", {})
-                if isinstance(mp, dict):
-                    pdf_ctx_to_inject = (mp.get(str(reply_id)) or "").strip()
+                mp_t = state.get("pdf_msg_to_thread", {})
+                if isinstance(mp_t, dict):
+                    tid = str(mp_t.get(str(reply_id)) or "").strip()
+                    if tid:
+                        th = (state.get("pdf_threads") or {}).get(tid)
+                        if isinstance(th, dict):
+                            pdf_ctx_to_inject = _pdf_serialize_thread(th)
             except Exception:
                 pdf_ctx_to_inject = ""
 
-            # 2) 兜底：如果无法获取 bot 消息 id（或历史版本没存），则在“存在引用”时弱绑定到最近一次 PDF
+            # 2) 旧结构兼容：按“被引用消息 id -> LaTeX 源码”匹配
+            if not pdf_ctx_to_inject:
+                try:
+                    mp = state.get("pdf_ctx_map", {})
+                    if isinstance(mp, dict):
+                        pdf_ctx_to_inject = (mp.get(str(reply_id)) or "").strip()
+                except Exception:
+                    pdf_ctx_to_inject = ""
+
+            # 3) 兜底：如果无法获取 bot 消息 id（或历史版本没存），则在“存在引用”时弱绑定到最近一次 PDF
             if not pdf_ctx_to_inject:
                 last_pdf_ctx = (state.get("last_pdf_context") or "").strip()
                 if last_pdf_ctx:
@@ -2082,9 +2250,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
                 f"[START LATEX CONTEXT]\n{pdf_ctx_to_inject}\n[END LATEX CONTEXT]\n"
             )
 
-        router = await self._router_classify(user_text) if user_text else None
-
-        heuristic_is_math = _is_math_question(user_text)
+        # A router/keyword match or merely receiving a picture cannot grant image
+        # permission. Clear requests for text take precedence even for real math.
+        if not image_decision.allowed:
+            return
+        router = await self._router_classify(user_text) if user_text and image_decision.math_request else None
         explicit_hint = any(k in user_text for k in _HINT_PREF)
         wants_full = _wants_full_solution(user_text) or (router.get("wants_full_solution") if router else False)
 
@@ -2092,20 +2262,14 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         if kb_query and bool(self._cfg("force_full_on_kb_query", True)):
             wants_full = True
 
-        is_math = heuristic_is_math or (router.get("is_math") if router else False)
-        if kb_query:
-            # 让知识库检索问法也走“数学答疑”管线（输出 <md> 图片）
-            is_math = True
-        if bool(current_images) and treat_img_as_math:
-            is_math = True
+        is_math = image_decision.math_request
 
         if is_math and explicit_hint and not wants_full:
             return
         if is_math:
             wants_full = True
 
-        is_followup_full = (not is_math) and wants_full and (last_problem or last_had_img)
-        if not (is_math or is_followup_full):
+        if not is_math:
             return
 
         # 记录“上一题”
@@ -2122,13 +2286,6 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
         mode = "full"
         event.set_extra("math_flow",
                         {"mode": mode, "has_image": bool(current_images), "kb_query": kb_query, "kb_n": kb_n})
-
-        if mode == "full" and is_followup_full:
-            req.prompt = (
-                "用户要求你给出上一题的完整解答过程\n"
-                "请结合上下文中上一题（可能是图片题）来解题\n"
-                f"用户补充：{user_text}\n"
-            )
 
         persona = str(self._cfg("math_persona", DEFAULT_CFG["math_persona"]) or "").strip()
         req.system_prompt = (req.system_prompt or "") + self._build_math_system_prompt(
@@ -2240,10 +2397,26 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
     # ---------- LLM响应：full 强制 <md>；hint 预计算提示流 ----------
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
+        if event.get_extra("md2img_pdf_theme_command"):
+            return
+        if event.get_extra("md2img_pdf_generation") or event.get_extra("mathsolve_md_generation"):
+            return  # Internal LaTeX generation is never an image-chat response.
+        if markdown_document_requested(event):
+            resp.completion_text = plain_reply_text(resp.completion_text or "")
+            return  # Agent acknowledgements are text, not another image answer.
         raw = resp.completion_text or ""
+        image_decision = image_reply_decision(event)
+        image_allowed = image_decision.allowed and not image_tool_already_sent(event)
+        if not image_allowed:
+            resp.completion_text = plain_reply_text(raw)
+            raw = resp.completion_text
         event.set_extra("raw_llm", raw)
 
-        mf = event.get_extra("math_flow")
+        mf = event.get_extra("math_flow") if image_allowed else None
+        if image_allowed and image_decision.math_request and not isinstance(mf, dict):
+            # A confirmed in-flight follow-up can arrive after on_llm_req.
+            mf = {"mode": "full", "has_image": False}
+            event.set_extra("math_flow", mf)
         if not isinstance(mf, dict):
             # 非数学流程：也写入对话记忆（普通聊天）
             try:
@@ -2340,7 +2513,11 @@ class MarkdownConverterPlugin(DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin
     # ---------------- 装饰结果：hint 逐条消息；否则 Markdown->图片 ----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
-        mf = event.get_extra("math_flow")
+        if event.get_extra("md2img_pdf_theme_command"):
+            return
+        if event.get_extra("mathsolve_md_generation") or markdown_document_requested(event):
+            return  # /md status/errors and file are never a screenshot response.
+        mf = event.get_extra("math_flow") if image_reply_decision(event).allowed else None
         if isinstance(mf, dict) and mf.get("mode") == "hint":
             msgs = event.get_extra("math_stream_msgs")
             if not isinstance(msgs, list) or not msgs:

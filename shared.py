@@ -20,6 +20,17 @@ from datetime import datetime
 from collections import deque, Counter
 import math
 import random
+try:
+    from .resource_cleanup import acquire, cleanup, owned, run_process, release_instance_resources, retire_legacy_instances
+except ImportError:
+    from resource_cleanup import acquire, cleanup, owned, run_process, release_instance_resources, retire_legacy_instances
+
+try:
+    from .font_support import build_pdf_cjk_font_preamble
+    from .pdf_styles import box_preamble
+except ImportError:
+    from font_support import build_pdf_cjk_font_preamble
+    from pdf_styles import box_preamble
 
 # AstrBot 依赖
 from astrbot.api import logger
@@ -207,12 +218,17 @@ DEFAULT_CFG: Dict[str, Any] = {
 
     # /pdf 指令：生成 PDF 解答（本地编译）
     "enable_pdf_output": True,
-    # /pdf 提示词是否额外加入“少用行间公式、少换行、页面紧凑”的排版要求
+    # 兼容旧配置：新版已改为每个 /pdf 模型槽位分别控制紧凑排版提示
     "pdf_enable_compact_prompt_rules": True,
     # 可选：指定 /pdf 使用的模型（留空=跟随默认会话模型）
     "pdf_provider_id": "",
     # /pdf 主生成模型超时（秒）：0 表示不限制；超时/失败后会尝试下一个候补模型
     "pdf_provider_timeout_sec": 180,
+    "pdf_provider_enable_compact_prompt_rules": True,
+    # 用户输入包含 gpt（不区分大小写）时优先使用的 /pdf 模型
+    "pdf_gpt_provider_id": "",
+    "pdf_gpt_provider_timeout_sec": 180,
+    "pdf_gpt_provider_enable_compact_prompt_rules": True,
     # /pdf 正式生成前先用短 prompt 检查模型连通性；失败/超时则直接尝试下一个模型
     "pdf_enable_provider_preflight": True,
     "pdf_provider_preflight_timeout_sec": 8,
@@ -221,14 +237,19 @@ DEFAULT_CFG: Dict[str, Any] = {
     # /pdf 候补模型：WebUI 中每个槽位都是 provider 下拉框，并可单独配置超时
     "pdf_fallback_provider_id_1": "",
     "pdf_fallback_provider_timeout_sec_1": 180,
+    "pdf_fallback_provider_enable_compact_prompt_rules_1": True,
     "pdf_fallback_provider_id_2": "",
     "pdf_fallback_provider_timeout_sec_2": 180,
+    "pdf_fallback_provider_enable_compact_prompt_rules_2": True,
     "pdf_fallback_provider_id_3": "",
     "pdf_fallback_provider_timeout_sec_3": 180,
+    "pdf_fallback_provider_enable_compact_prompt_rules_3": True,
     "pdf_fallback_provider_id_4": "",
     "pdf_fallback_provider_timeout_sec_4": 180,
+    "pdf_fallback_provider_enable_compact_prompt_rules_4": True,
     "pdf_fallback_provider_id_5": "",
     "pdf_fallback_provider_timeout_sec_5": 180,
+    "pdf_fallback_provider_enable_compact_prompt_rules_5": True,
     # 兼容旧配置：仍支持文本列表，但不再展示到 WebUI
     "pdf_fallback_provider_ids": "",
     # 兼容旧配置：仍支持 provider_id=timeout_sec 覆盖，但不再展示到 WebUI
@@ -244,6 +265,10 @@ DEFAULT_CFG: Dict[str, Any] = {
 
 # /spdf 指令：DeepThink 多角色迭代 PDF 解答（仅在用户使用 /spdf 时启用，不影响原 /pdf）
 "enable_spdf_output": True,
+"spdf_time_limit_enabled": False,
+"spdf_allowed_start": "08:00",
+"spdf_allowed_end": "23:00",
+"spdf_time_limit_exempt_qq": [],
 # /spdf 使用的“基础模型” provider_id（留空=默认会话模型）
 "spdf_provider_id": "",
 # 兼容旧配置：角色池文本列表不再展示到 WebUI，新的 WebUI 使用下方 4 个下拉槽位
@@ -343,13 +368,12 @@ DEFAULT_CFG: Dict[str, Any] = {
     # 上一张图用于 /pdf 的“有效期”（秒），默认 1 小时（仅用于预判提示）
     "last_image_valid_sec": 3600,
 
-    # /pdf：当本条消息是纯文字但上一题是图片时，是否自动把“上一张图片”一起发给模型
-    # - "always": 只要有上一张图片就总是带上（旧行为，容易导致你说的“新题仍回答旧图”）
-    # - "smart": 仅在用户文本看起来像追问/引用图片时才带上（推荐，默认）
-    # - "never": 永不自动带上（需要用户重新发图）
-    "pdf_reuse_last_image_with_text_mode": "smart",
-    # smart 模式下：把“短文本且不太像新题”的内容视作追问，默认 40 字以内
-    "pdf_followup_text_max_len": 40,
+    # /pdf、/spdf 追问协议（引用即追问）：
+    # - 消息带图 => 用该图（配合引用则作为该线程追问的补充截图）
+    # - 引用某份 PDF => 追问该题所在线程
+    # - 本人刚单发的“孤图”在时间窗内 => 视同随命令携带
+    # - 纯文字 => 一律新题（不再做关键词/长度猜测）
+    "pdf_pending_image_window_sec": 300,
 
     # hint 模式是否 stop_event（默认保持原行为）
     "stop_event_on_hint": True,
@@ -431,18 +455,48 @@ DEFAULT_CFG: Dict[str, Any] = {
 # =========================
 # 模式识别
 # =========================
+def _normalize_render_mode(mode: Any) -> Optional[str]:
+    value = str(mode or "").strip().lower()
+    return value if value in ("mobile", "pc") else None
+
+
+def set_user_mode_preference(user_id: Any, mode: str) -> bool:
+    """记录用户通过 /pc 或 /pe 显式设置的渲染模式。"""
+    key = str(user_id or "").strip()
+    normalized = _normalize_render_mode(mode)
+    if not key or normalized is None:
+        return False
+    USER_PREFERENCES[key] = normalized
+    return True
+
+
+def _get_explicit_user_mode(event: Optional[AstrMessageEvent]) -> Optional[str]:
+    if event is None:
+        return None
+    try:
+        user_id = event.get_sender_id()
+        if user_id is None:
+            return None
+
+        # 新写入统一使用字符串 key；同时兼容热更新前可能留下的原始类型 key。
+        string_key = str(user_id).strip()
+        for key in (string_key, user_id):
+            if key in USER_PREFERENCES:
+                return _normalize_render_mode(USER_PREFERENCES[key])
+    except Exception as e:
+        logger.error(f"读取用户显式渲染模式异常: {e}")
+    return None
+
+
 def get_user_mode(event: AstrMessageEvent) -> str:
     """获取用户的显示模式。
     优先级：用户手动设置 > 自动检测 > 默认(mobile)
     """
     try:
-        user_id = event.get_sender_id()
-        if not user_id:
-            return "mobile"
-
         # 1. 检查用户是否有手动设置的偏好
-        if user_id in USER_PREFERENCES:
-            return USER_PREFERENCES[user_id]
+        explicit_mode = _get_explicit_user_mode(event)
+        if explicit_mode:
+            return explicit_mode
 
         # 2. 尝试从 raw_message 中自动检测 (针对 NapCat 修复版)
         raw = getattr(event, "raw_message", None)
@@ -456,6 +510,26 @@ def get_user_mode(event: AstrMessageEvent) -> str:
     except Exception as e:
         logger.error(f"get_user_mode 异常: {e}")
         return "mobile"
+
+
+def resolve_render_mode(
+    event: Optional[AstrMessageEvent] = None,
+    requested_mode: Any = None,
+) -> str:
+    """统一解析所有图片渲染入口的模式。
+
+    优先级：用户 /pc、/pe 显式设置 > 调用方请求的模式 > 自动检测/默认。
+    这样 Agent Tool 即使传入 mode=mobile，也不会覆盖用户已选的 /pc。
+    """
+    explicit_mode = _get_explicit_user_mode(event)
+    if explicit_mode:
+        return explicit_mode
+
+    requested = _normalize_render_mode(requested_mode)
+    if requested:
+        return requested
+
+    return get_user_mode(event) if event is not None else "mobile"
 
 
 # -------------------------------------------------------------------------
@@ -479,6 +553,65 @@ def _get_session_key(event: AstrMessageEvent) -> str:
     except Exception:
         pass
     return "unknown"
+
+
+def _get_sender_uid(event: AstrMessageEvent) -> str:
+    """稳定的发送者 ID，用于会话内按用户隔离 /pdf 状态。"""
+    try:
+        uid = event.get_sender_id()
+        if uid is not None and str(uid).strip():
+            return str(uid).strip()
+    except Exception:
+        pass
+    try:
+        uid = getattr(getattr(event, "message_obj", None), "sender", None)
+        uid = getattr(uid, "user_id", None) or getattr(uid, "id", None)
+        if uid is not None and str(uid).strip():
+            return str(uid).strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _user_state(state: Dict[str, Any], uid: str) -> Dict[str, Any]:
+    """取会话 state 里指定用户的私有名字空间（孤图、上一张图、最近线程等）。"""
+    users = state.setdefault("users", {})
+    if not isinstance(users, dict):
+        users = {}
+        state["users"] = users
+    ust = users.setdefault(str(uid or "unknown"), {})
+    if not isinstance(ust, dict):
+        ust = {}
+        users[str(uid or "unknown")] = ust
+    return ust
+
+
+def _pdf_serialize_thread(thread: Dict[str, Any]) -> str:
+    """把 /pdf 追问线程序列化为提示词上下文文本（全量，不裁剪）。"""
+    if not isinstance(thread, dict):
+        return ""
+    parts: List[str] = []
+    root_text = str(thread.get("root_problem_text") or "").strip()
+    if root_text:
+        parts.append("【原始题目】\n" + root_text)
+    elif thread.get("root_image_refs"):
+        parts.append("【原始题目】\n（图片题，原题图片已随本次请求一并提供）")
+    turns = thread.get("turns") or []
+    answer_no = 0
+    for t in turns:
+        if not isinstance(t, dict):
+            continue
+        text = str(t.get("text") or "").strip()
+        if not text:
+            continue
+        if t.get("role") == "assistant":
+            answer_no += 1
+            parts.append(f"【第{answer_no}份 PDF 解答的 LaTeX 源码】\n{text}")
+        else:
+            # 第一轮 user 即原始题目，已在 root 输出过
+            if answer_no >= 1:
+                parts.append(f"【用户追问（针对第{answer_no}份解答）】\n{text}")
+    return "\n\n".join(parts).strip()
 
 
 def _get_event_images(event: AstrMessageEvent) -> List[str]:
@@ -1693,13 +1826,13 @@ def _normalize_markdown_proof_end_marker(md_text: str) -> str:
 
 
 def _prepare_markdown_for_render(md_text: str) -> str:
-    """Markdown 渲染前的轻量规范化：结构化数学解答、还原 SVG、收窄 HTML。"""
+    """仅做渲染兼容处理，保留原文标题、段落和卡片，不猜测解题意图。"""
     text = (md_text or "").strip()
     text = _strip_known_xml_like_tags(text)
     text = _unwrap_svg_code_fences(text)
     text = _sanitize_inline_html_for_render(text)
     text = _normalize_inline_svg_markup(text)
-    text = _auto_structure_math_note_markdown(text)
+    # 普通聊天也会提到“积分、方程”等词；渲染器不据此补标题或重排正文。
     return _normalize_markdown_proof_end_marker(text)
 
 
@@ -2006,6 +2139,7 @@ def _build_pdf_latex_document(problem_tex: str, theorems_tex: str, solution_tex:
     """
     parts = [
         r"\documentclass[UTF8]{ctexart}",
+        *build_pdf_cjk_font_preamble(problem_tex, theorems_tex, solution_tex),
         r"\usepackage[a4paper,margin=2.2cm]{geometry}",
         # 提供 \textless/\textgreater/\textasciitilde/\textasciicircum 等文本符号，
         # 用于把用户/模型输出中的 < > ~ ^ 安全落在 LaTeX 文本模式里。
@@ -2028,12 +2162,7 @@ def _build_pdf_latex_document(problem_tex: str, theorems_tex: str, solution_tex:
         r"\setlist{nosep}",
         r"\setlength{\parindent}{0pt}",
         r"\linespread{1.3}",
-        r"\tcbset{enhanced, boxrule=0.8pt, arc=2.5mm}",
-
-        r"\newtcolorbox{problemBox}[1][]{colback=blue!3!white, colframe=blue!65!black, title=题目, fonttitle=\bfseries, #1}",
-        r"\newtcolorbox{theoremBox}[2][]{colback=teal!3!white, colframe=teal!65!black, title=定理：#2, fonttitle=\bfseries, #1}",
-        r"\newtcolorbox{lemmaBox}[2][]{colback=orange!5!white, colframe=orange!80!black, title=引理：#2, fonttitle=\bfseries, #1}",
-        r"\newtcolorbox{formulaBox}[2][]{colback=violet!3!white, colframe=violet!65!black, title=公式：#2, fonttitle=\bfseries, #1}",
+        *box_preamble(),
 
         r"\begin{document}",
         r"\section*{解题所需结论}",
@@ -2061,6 +2190,13 @@ def _build_pdf_latex_document_multi(items: List[Tuple[str, str, str]]) -> str:
     """
     parts = [
         r"\documentclass[UTF8]{ctexart}",
+        *build_pdf_cjk_font_preamble(
+            *[
+                text
+                for problem_tex, theorems_tex, solution_tex in items
+                for text in (problem_tex, theorems_tex, solution_tex)
+            ]
+        ),
         r"\usepackage[a4paper,margin=2.2cm]{geometry}",
         r"\usepackage{textcomp}",
         r"\usepackage{amsmath,amssymb,amsthm,mathtools,bm,mathrsfs,cancel}",
@@ -2077,11 +2213,7 @@ def _build_pdf_latex_document_multi(items: List[Tuple[str, str, str]]) -> str:
         r"\setlist{nosep}",
         r"\setlength{\parindent}{0pt}",
         r"\linespread{1.3}",
-        r"\tcbset{enhanced, boxrule=0.8pt, arc=2.5mm}",
-        r"\newtcolorbox{problemBox}[1][]{colback=blue!3!white, colframe=blue!65!black, title=题目, fonttitle=\bfseries, #1}",
-        r"\newtcolorbox{theoremBox}[2][]{colback=teal!3!white, colframe=teal!65!black, title=定理：#2, fonttitle=\bfseries, #1}",
-        r"\newtcolorbox{lemmaBox}[2][]{colback=orange!5!white, colframe=orange!80!black, title=引理：#2, fonttitle=\bfseries, #1}",
-        r"\newtcolorbox{formulaBox}[2][]{colback=violet!3!white, colframe=violet!65!black, title=公式：#2, fonttitle=\bfseries, #1}",
+        *box_preamble(),
         r"\begin{document}",
     ]
 

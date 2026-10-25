@@ -1,11 +1,21 @@
 # -*- coding: utf-8 -*-
 try:
     from .shared import *
+    from .pdf_styles import randomized_pdf_style
+    from .usage_tracking import tracked_generation, record_model_call
+    from .token_usage import generate_with_token_usage
+    from .qq_image_recovery import (PdfImageInputError, QqImageRecoveryMixin,
+                                    image_cache_identity, qq_image_parts, safe_image_error)
 except ImportError:
     from shared import *
+    from pdf_styles import randomized_pdf_style
+    from usage_tracking import tracked_generation, record_model_call
+    from token_usage import generate_with_token_usage
+    from qq_image_recovery import (PdfImageInputError, QqImageRecoveryMixin,
+                                   image_cache_identity, qq_image_parts, safe_image_error)
 
 
-class PdfMixin:
+class PdfMixin(QqImageRecoveryMixin):
     """PDF generation, provider fallback, and TeX compilation helpers."""
 
     @staticmethod
@@ -275,40 +285,53 @@ class PdfMixin:
             shutil.copy2(src, dst)
         return dst
 
-    async def _pdf_get_event_image_inputs(self, event: AstrMessageEvent) -> List[str]:
-        """提取消息图片，并立刻转成 /pdf 可稳定使用的图片输入。"""
+    async def _pdf_get_event_image_inputs(self, event: AstrMessageEvent,
+                                          defer_errors: bool = False) -> List[str]:
+        """每个图片组件只保留一份输入；坏链接只能留待命令重试，不能交给模型。"""
+        cached = getattr(event, "_mathsolve_pdf_image_inputs", None)
+        if cached is not None:
+            return list(cached)
         refs: List[str] = []
-        seen = set()
-
-        def add_ref(value: Any):
-            u = str(value or "").strip()
-            if u and u not in seen:
-                seen.add(u)
-                refs.append(u)
-
-        try:
-            msg_obj = getattr(event, "message_obj", None)
-            for comp in (getattr(msg_obj, "message", None) or []):
-                if not (isinstance(comp, Image) or comp.__class__.__name__.lower() == "image"):
+        all_ready = True
+        msg_obj = getattr(event, "message_obj", None)
+        for comp in (getattr(msg_obj, "message", None) or []):
+            if not (isinstance(comp, Image) or comp.__class__.__name__.lower() == "image"):
+                continue
+            candidates = []
+            file_ref = str(getattr(comp, "file", "") or "").strip()
+            url_ref = str(getattr(comp, "url", "") or "").strip()
+            for value in (file_ref, url_ref):
+                if not value or value in candidates:
                     continue
+                local = self._pdf_ref_to_local_path(value)
+                if not local or os.path.isfile(local):
+                    candidates.append(value)
+            # Prefer existing local bytes over another attempt at an expired URL.
+            candidates.sort(key=self._pdf_is_http_image_url)
+            ready = None
+            for value in candidates:
                 try:
-                    if hasattr(comp, "convert_to_file_path"):
-                        p = await comp.convert_to_file_path()
-                        add_ref(p)
-                except Exception:
-                    logger.warning("/pdf 图片 convert_to_file_path 失败，将尝试 url/file 字段", exc_info=True)
+                    ready = await self._pdf_snapshot_image_urls([value], event=event)
+                    break
+                except PdfImageInputError:
+                    continue
+            if ready is None and not candidates and hasattr(comp, "convert_to_file_path"):
                 try:
-                    add_ref(getattr(comp, "url", None))
-                except Exception:
-                    pass
-                try:
-                    add_ref(getattr(comp, "file", None))
-                except Exception:
-                    pass
-        except Exception:
-            logger.warning("/pdf 提取消息图片失败", exc_info=True)
-
-        return await self._pdf_snapshot_image_urls(refs)
+                    path = await asyncio.wait_for(comp.convert_to_file_path(), timeout=15)
+                    ready = await self._pdf_snapshot_image_urls([path], event=event)
+                except Exception as exc:
+                    logger.warning(f"/pdf 图片组件读取失败: {safe_image_error(exc)}")
+            if ready is None:
+                all_ready = False
+                if not defer_errors:
+                    raise PdfImageInputError("图片读取失败：已尝试恢复图片输入，但仍无法读取。请重新上传原图后重试；本次未调用模型。")
+                # Overwrite the user's previous image with THIS failed input; otherwise
+                # a following bare /pdf could silently answer the previous question.
+                ready = [url_ref or file_ref or "missing-image-input"]
+            refs.extend(value for value in ready if value not in refs)
+        if all_ready:
+            setattr(event, "_mathsolve_pdf_image_inputs", tuple(refs))
+        return refs
 
     @staticmethod
     def _pdf_guess_image_ext(url: str, content_type: str = "") -> str:
@@ -326,6 +349,12 @@ class PdfMixin:
         return ".jpg"
 
     def _pdf_download_image_sync(self, url: str, timeout_sec: int, max_bytes: int) -> str:
+        key = hashlib.sha256(image_cache_identity(str(url)).encode()).hexdigest()
+        os.makedirs(self.IMAGE_CACHE_DIR, exist_ok=True)
+        for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"):
+            cached = os.path.join(self.IMAGE_CACHE_DIR, f"pdf_input_{key}{ext}")
+            if os.path.isfile(cached) and 0 < os.path.getsize(cached) <= max_bytes:
+                return cached
         req = urllib.request.Request(
             str(url),
             headers={
@@ -338,29 +367,42 @@ class PdfMixin:
             if content_length and int(content_length) > max_bytes:
                 raise RuntimeError(f"image too large: {content_length} bytes")
             content_type = str(resp.headers.get("Content-Type") or "")
+            if content_type.split(";", 1)[0].strip().lower() in ("application/json", "text/html", "text/plain"):
+                raise RuntimeError("download response is not an image")
             data = resp.read(max_bytes + 1)
             if len(data) > max_bytes:
                 raise RuntimeError(f"image too large: >{max_bytes} bytes")
         if not data:
             raise RuntimeError("empty image response")
         ext = self._pdf_guess_image_ext(url, content_type)
-        os.makedirs(self.IMAGE_CACHE_DIR, exist_ok=True)
-        path = os.path.join(self.IMAGE_CACHE_DIR, f"pdf_input_{uuid.uuid4().hex}{ext}")
-        with open(path, "wb") as f:
-            f.write(data)
+        path = os.path.join(self.IMAGE_CACHE_DIR, f"pdf_input_{key}{ext}")
+        fd, pending = tempfile.mkstemp(prefix="pdf_input_", suffix=".part", dir=self.IMAGE_CACHE_DIR)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(pending, path)
+        finally:
+            if os.path.exists(pending):
+                os.unlink(pending)
         return path
 
-    async def _pdf_snapshot_image_urls(self, image_urls: Optional[List[str]]) -> List[str]:
+    async def _pdf_snapshot_image_urls(self, image_urls: Optional[List[str]],
+                                      event: Optional[AstrMessageEvent] = None) -> List[str]:
         """在 /pdf 模型链开始前固定图片输入，并转成 data URI 交给视觉模型。"""
         urls = [str(u or "").strip() for u in (image_urls or []) if str(u or "").strip()]
-        if not urls or (not bool(self._cfg("pdf_snapshot_images_before_generation", True))):
+        if not urls:
             return urls
 
         timeout_sec = int(self._cfg("pdf_snapshot_image_timeout_sec", 15) or 15)
         max_bytes = int(self._cfg("pdf_snapshot_image_max_bytes", 25 * 1024 * 1024) or (25 * 1024 * 1024))
+        snapshot_enabled = bool(self._cfg("pdf_snapshot_images_before_generation", True))
         loop = asyncio.get_running_loop()
         out: List[str] = []
-        for u in urls:
+        for u in dict.fromkeys(urls):
+            # QQ's expiring URLs must be resolved even if general URL snapshots are disabled.
+            if not snapshot_enabled and self._pdf_is_http_image_url(u) and not qq_image_parts(u):
+                out.append(u)
+                continue
             if self._pdf_is_data_image_ref(u):
                 out.append(u)
                 continue
@@ -368,27 +410,35 @@ class PdfMixin:
                 payload = u[len("base64://"):].strip()
                 if payload:
                     out.append("data:image/jpeg;base64," + payload)
+                else:
+                    raise PdfImageInputError("图片读取失败：收到空图片，请重新上传原图。")
                 continue
             try:
                 if self._pdf_is_http_image_url(u):
-                    local_path = await loop.run_in_executor(
-                        None,
-                        lambda url=u: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
-                    )
+                    try:
+                        local_path = await loop.run_in_executor(
+                            None, lambda url=u: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
+                        )
+                    except Exception as download_error:
+                        if getattr(download_error, "code", None) not in (400, 401, 403) or not qq_image_parts(u):
+                            raise
+                        refreshed = await self._pdf_refresh_qq_image_url(u, event, timeout_sec)
+                        local_path = await loop.run_in_executor(
+                            None, lambda url=refreshed: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
+                        )
+                        logger.info("/pdf QQ 图片凭证已自动刷新，图片下载恢复")
                 else:
                     local_path = await loop.run_in_executor(
                         None,
                         lambda url=u: self._pdf_copy_local_image_sync(url),
                     )
                 data_uri = self._pdf_image_path_to_data_uri(local_path)
-                out.append(data_uri)
+                if data_uri not in out:
+                    out.append(data_uri)
                 logger.info(f"/pdf 图片已快照为 data URI: source={self._pdf_describe_image_ref(u)} local_path={local_path}")
             except Exception as e:
-                if self._pdf_is_http_image_url(u):
-                    logger.warning(f"/pdf 远程图片本地快照失败，将继续使用原始 URL: {e}")
-                    out.append(u)
-                else:
-                    logger.warning(f"/pdf 本地图片不可用，已跳过: source={self._pdf_describe_image_ref(u)} err={e}")
+                logger.warning(f"/pdf 图片输入失败，已停止生成: source={self._pdf_describe_image_ref(u)} error={safe_image_error(e)}")
+                raise PdfImageInputError("图片读取失败：图片无法下载或读取，已停止生成以免漏题。请重新上传原图后重试；这不是模型超时。") from e
         return out
 
     def _pdf_parse_provider_entry(self, entry: str) -> Tuple[str, Optional[int]]:
@@ -403,21 +453,41 @@ class PdfMixin:
         timeout_sec = self._pdf_parse_timeout_value(timeout_txt, None)
         return (pid or "").strip(), timeout_sec
 
+    @staticmethod
+    def _pdf_requests_gpt_model(problem_text: str) -> bool:
+        """用户输入中出现 gpt（大小写不敏感）时请求 GPT 专用模型。"""
+        return re.search(r"gpt", str(problem_text or ""), flags=re.I) is not None
+
+    def _pdf_compact_enabled_for_slot(self, key: str, default: bool = True) -> bool:
+        """读取模型槽位的紧凑提示开关，并兼容旧版全局配置。"""
+        missing = object()
+        value = self._cfg(key, missing)
+        if value is missing:
+            value = self._cfg("pdf_enable_compact_prompt_rules", default)
+        return bool(value)
+
     def _pdf_build_provider_chain(
             self,
             primary_provider_id: str,
             current_provider_id: str,
+            routed_provider_id: str = "",
+            routed_timeout_sec: Optional[int] = None,
+            routed_compact_prompt_rules: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         构建 /pdf 生成模型链。
-        第一个模型来自 pdf_provider_id（留空则当前会话模型），后续来自 WebUI 的候补模型槽位。
+        关键词指定模型优先；随后是 pdf_provider_id（留空则当前会话模型）和候补模型槽位。
         """
         default_timeout = self._pdf_default_model_timeout_sec()
         overrides = self._pdf_parse_timeout_overrides()
         chain: List[Dict[str, Any]] = []
         seen = set()
 
-        def add_provider(pid: str, timeout_sec: Optional[int] = None) -> None:
+        def add_provider(
+                pid: str,
+                timeout_sec: Optional[int] = None,
+                compact_prompt_rules: Optional[bool] = None,
+        ) -> None:
             p = str(pid or "").strip()
             if not p or p in seen:
                 return
@@ -425,9 +495,26 @@ class PdfMixin:
             final_timeout = timeout_sec
             if final_timeout is None:
                 final_timeout = overrides.get(p, default_timeout)
-            chain.append({"provider_id": p, "timeout_sec": max(0, int(final_timeout or 0))})
+            if compact_prompt_rules is None:
+                compact_prompt_rules = bool(self._cfg("pdf_enable_compact_prompt_rules", True))
+            chain.append({
+                "provider_id": p,
+                "timeout_sec": max(0, int(final_timeout or 0)),
+                "compact_prompt_rules": bool(compact_prompt_rules),
+            })
 
-        add_provider(str(primary_provider_id or current_provider_id or "").strip())
+        add_provider(
+            routed_provider_id,
+            routed_timeout_sec,
+            routed_compact_prompt_rules,
+        )
+
+        add_provider(
+            str(primary_provider_id or current_provider_id or "").strip(),
+            compact_prompt_rules=self._pdf_compact_enabled_for_slot(
+                "pdf_provider_enable_compact_prompt_rules",
+            ),
+        )
 
         for i in range(1, 6):
             pid = str(self._cfg(f"pdf_fallback_provider_id_{i}", "") or "").strip()
@@ -435,7 +522,13 @@ class PdfMixin:
                     self._cfg(f"pdf_fallback_provider_timeout_sec_{i}", None),
                     None,
             )
-            add_provider(pid, timeout_sec)
+            add_provider(
+                pid,
+                timeout_sec,
+                self._pdf_compact_enabled_for_slot(
+                    f"pdf_fallback_provider_enable_compact_prompt_rules_{i}",
+                ),
+            )
 
         # 兼容旧版文本配置：若用户配置里还残留 pdf_fallback_provider_ids，也继续读取。
         fallback_raw = str(self._cfg("pdf_fallback_provider_ids", "") or "")
@@ -511,7 +604,7 @@ class PdfMixin:
         timeout_sec = self._pdf_preflight_timeout_sec()
         prompt = "ping\n请只回复 OK，不要输出其它内容。"
         try:
-            call = self.context.llm_generate(
+            call = generate_with_token_usage(self,
                 chat_provider_id=pid,
                 prompt=prompt,
                 image_urls=[],
@@ -543,7 +636,7 @@ class PdfMixin:
     async def _pdf_llm_generate_with_fallback(
             self,
             provider_chain: List[Dict[str, Any]],
-            prompt: str,
+            prompt: Any,
             image_urls: Optional[List[str]] = None,
             purpose: str = "",
     ) -> Tuple[str, str, List[str]]:
@@ -554,6 +647,7 @@ class PdfMixin:
         failures: List[Tuple[str, str]] = []
         attempted_provider_ids: List[str] = []
         image_error_count = 0
+        generation_failure_count = 0
         last_exc: Optional[BaseException] = None
 
         for idx, spec in enumerate(provider_chain):
@@ -569,9 +663,11 @@ class PdfMixin:
                 failures.append((pid, str(last_exc)))
                 continue
             try:
-                call = self.context.llm_generate(
+                model_prompt = prompt(spec) if callable(prompt) else prompt
+                record_model_call(pid)
+                call = generate_with_token_usage(self,
                     chat_provider_id=pid,
-                    prompt=prompt,
+                    prompt=str(model_prompt or ""),
                     image_urls=image_urls if image_urls else [],
                 )
                 llm_resp = await asyncio.wait_for(call, timeout=timeout_sec) if timeout_sec > 0 else await call
@@ -589,6 +685,7 @@ class PdfMixin:
                     return raw, pid, attempted_provider_ids
                 raise RuntimeError("empty_completion")
             except asyncio.TimeoutError as e:
+                generation_failure_count += 1
                 last_exc = RuntimeError(f"provider_id={pid} timeout after {timeout_sec}s")
                 self._pdf_set_preflight_cache(pid, False, str(last_exc))
                 failures.append((pid, str(last_exc)))
@@ -596,21 +693,26 @@ class PdfMixin:
             except Exception as e:
                 last_exc = e
                 err_str = str(e)
-                if "400" in err_str or "process input image" in err_str:
+                generation_failure_count += 1
+                if "failed to download file from" in err_str.lower():
+                    raise PdfImageInputError("图片读取失败：模型调用前下载图片失败，已停止轮换模型。请重新上传原图后重试。") from e
+                if any(marker in err_str.lower() for marker in ("process input image", "image invalid", "invalid image")):
                     image_error_count += 1
                 else:
                     self._pdf_set_preflight_cache(pid, False, err_str)
                 failures.append((pid, err_str))
                 logger.warning(f"/pdf 模型调用失败，尝试下一个: purpose={purpose or '-'} provider_id={pid}: {err_str}")
 
-        if failures and image_error_count == len(failures):
-            raise RuntimeError("Upstream Error: Image invalid")
+        if image_error_count and image_error_count == generation_failure_count:
+            raise PdfImageInputError("图片读取失败：可用模型均无法处理该图片，请重新上传原图。候补模型配置错误不会改变这个图片错误。")
 
         summary = "; ".join(f"{pid}: {err}" for pid, err in failures[-3:])
         if last_exc:
             raise RuntimeError(f"PDF 模型调用全部失败({purpose or '-'}): {summary or last_exc}") from last_exc
         raise RuntimeError("PDF 模型调用全部失败")
 
+    @tracked_generation('pdf')
+    @randomized_pdf_style
     async def _solve_math_to_pdf(
             self,
             problem_text: str,
@@ -620,6 +722,10 @@ class PdfMixin:
     ):
         """LLM -> LaTeX -> PDF（仅本地 xelatex 编译）"""
         primary_provider_id = str(self._cfg("pdf_provider_id", "") or "").strip()
+        gpt_requested = self._pdf_requests_gpt_model(problem_text)
+        gpt_provider_id = str(self._cfg("pdf_gpt_provider_id", "") or "").strip() if gpt_requested else ""
+        if gpt_requested and not gpt_provider_id:
+            logger.warning("/pdf 检测到 GPT 关键词，但未配置 pdf_gpt_provider_id；继续使用常规模型链")
 
         # 当前会话使用的 provider
         current_provider_id = ""
@@ -630,29 +736,46 @@ class PdfMixin:
 
         original_image_count = len(image_urls or [])
         if image_urls:
-            image_urls = await self._pdf_snapshot_image_urls(image_urls)
+            image_urls = await self._pdf_snapshot_image_urls(image_urls, event=event)
         has_image = bool(image_urls)
         if original_image_count and (not has_image) and (not str(problem_text or "").strip()):
             raise RuntimeError("Upstream Error: Image invalid")
         ref_pdf_latex = (ref_pdf_latex or "").strip()
 
-        provider_chain = self._pdf_build_provider_chain(primary_provider_id, current_provider_id)
+        gpt_timeout_sec = self._pdf_parse_timeout_value(
+            self._cfg("pdf_gpt_provider_timeout_sec", None),
+            self._pdf_default_model_timeout_sec(),
+        )
+        provider_chain = self._pdf_build_provider_chain(
+            primary_provider_id,
+            current_provider_id,
+            routed_provider_id=gpt_provider_id,
+            routed_timeout_sec=gpt_timeout_sec,
+            routed_compact_prompt_rules=(
+                self._pdf_compact_enabled_for_slot("pdf_gpt_provider_enable_compact_prompt_rules")
+                if gpt_provider_id else None
+            ),
+        )
 
         if not provider_chain:
             raise RuntimeError("未能获取 chat_provider_id")
         initial_provider_chain = list(provider_chain)
         provider_id = str(provider_chain[0].get("provider_id", "") or "").strip()
 
-        # 生成提示词：普通新题 / 引用上一份 PDF 追问
-        if ref_pdf_latex and (not has_image):
-            prompt = self._build_pdf_followup_prompt(
-                question_text=problem_text,
-                ref_pdf_latex=ref_pdf_latex,
-            )
-        else:
-            prompt = self._build_pdf_latex_prompt(
+        # 生成提示词：普通新题 / 追问（携带线程上下文；追问也可能带截图等新图）
+        def prompt(spec: Dict[str, Any]) -> str:
+            compact_prompt_rules = bool(spec.get("compact_prompt_rules", True))
+            if ref_pdf_latex:
+                return self._build_pdf_followup_prompt(
+                    question_text=problem_text,
+                    ref_pdf_latex=ref_pdf_latex,
+                    has_image=has_image,
+                    compact_prompt_rules=compact_prompt_rules,
+                )
+            return self._build_pdf_latex_prompt(
                 problem_text,
                 has_image=has_image,
+                compact_prompt_rules=compact_prompt_rules,
             )
 
         raw, provider_id, _initial_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
@@ -707,13 +830,15 @@ class PdfMixin:
                             break
 
                         # 编译失败：把日志发回给“生成 LaTeX 的模型”让其修复重写
-                        repair_prompt = self._build_pdf_latex_repair_prompt(
-                            problem_text=problem_text,
-                            has_image=has_image,
-                            compile_log=(self._last_texlive_log or ""),
-                            prev_tex_src=tex_src,
-                            prev_raw=raw,
-                        )
+                        def repair_prompt(spec: Dict[str, Any]) -> str:
+                            return self._build_pdf_latex_repair_prompt(
+                                problem_text=problem_text,
+                                has_image=has_image,
+                                compile_log=(self._last_texlive_log or ""),
+                                prev_tex_src=tex_src,
+                                prev_raw=raw,
+                                compact_prompt_rules=bool(spec.get("compact_prompt_rules", True)),
+                            )
 
                         raw, provider_id, _repair_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
                                 provider_chain=provider_chain,
@@ -754,13 +879,15 @@ class PdfMixin:
                         break
 
                     # 不完整：把缺失点回传给“生成 LaTeX 的模型”让其补全重写
-                    repair_prompt = self._build_pdf_incomplete_repair_prompt(
-                        problem_text=problem_text,
-                        has_image=has_image,
-                        issues=comp_issues,
-                        prev_tex_src=tex_src,
-                        prev_raw=raw,
-                    )
+                    def repair_prompt(spec: Dict[str, Any]) -> str:
+                        return self._build_pdf_incomplete_repair_prompt(
+                            problem_text=problem_text,
+                            has_image=has_image,
+                            issues=comp_issues,
+                            prev_tex_src=tex_src,
+                            prev_raw=raw,
+                            compact_prompt_rules=bool(spec.get("compact_prompt_rules", True)),
+                        )
 
                     raw, provider_id, _repair_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
                             provider_chain=provider_chain,
@@ -935,17 +1062,26 @@ class PdfMixin:
 
         return pdf_path, fname, tex_src
 
-    def _pdf_compact_prompt_rules(self, first_prefix: str = "   - ", next_prefix: Optional[str] = None) -> str:
-        if not bool(self._cfg("pdf_enable_compact_prompt_rules", True)):
+    def _pdf_compact_prompt_rules(
+            self,
+            first_prefix: str = "   - ",
+            next_prefix: Optional[str] = None,
+            enabled: Optional[bool] = None,
+    ) -> str:
+        if enabled is None:
+            enabled = bool(self._cfg("pdf_enable_compact_prompt_rules", True))
+        if not enabled:
             return ""
-        if next_prefix is None:
-            next_prefix = first_prefix
         return (
-            f"{first_prefix}只有必要的行间公式才使用 $$...$$ 语法，其余公式都使用行内公式 $...$。\n"
-            f"{next_prefix}生成的数学解答不要频繁换行，页面应该紧凑一些；连续推导尽量合并在同一段，只在关键步骤或必要的行间公式处换行。\n"
+            f"{first_prefix}只有必要的行间公式才使用 $$...$$ 语法，其余公式都使用行内公式 $...$\n"
         )
 
-    def _build_pdf_latex_prompt(self, problem_text: str, has_image: bool = False) -> str:
+    def _build_pdf_latex_prompt(
+            self,
+            problem_text: str,
+            has_image: bool = False,
+            compact_prompt_rules: Optional[bool] = None,
+    ) -> str:
         """/pdf 新题提示词（仅生成可编译的 LaTeX 片段）
         包含：TikZ绘图支持、知识点总结模式、完整性强制约束
         """
@@ -992,7 +1128,7 @@ class PdfMixin:
             "3) **数学环境**：\n"
             "   - 需要用到的定理/引理/公式请放在 <theorems> 段中。\n"
             "   - 使用对应环境：\\\\begin{theoremBox}{名称}...\\\\end{theoremBox}、\\\\begin{lemmaBox}{名称}...\\\\end{lemmaBox}。\n"
-            f"{self._pdf_compact_prompt_rules()}"
+            f"{self._pdf_compact_prompt_rules(enabled=compact_prompt_rules)}"
 
             "4) **【绘图支持】(重要)**：\n"
             "   - 如果题目涉及几何图形、函数图像或证明示意图（如三角形剖分、积分路径、区域 $D$），**请务必绘制示意图，并且尽可能的美观**。\n"
@@ -1041,6 +1177,7 @@ class PdfMixin:
             compile_log: str,
             prev_tex_src: str = "",
             prev_raw: str = "",
+            compact_prompt_rules: Optional[bool] = None,
     ) -> str:
         """当 /pdf 的 LaTeX 编译失败时，构造“修复重写”提示词。
         目标：让同一个“生成 LaTeX 的模型”根据编译日志重写一个可编译版本（仍输出 <problem>/<theorems>/<solution>）。"""
@@ -1074,7 +1211,7 @@ class PdfMixin:
             "2) 标签必须完整闭合；不要输出 Markdown 代码块/反引号；不要输出任何解释文字。\n",
             "3) 禁止使用需要 shell-escape 的写法；避免不常见/不稳定宏包；保持语法简单稳定。\n",
             "4) 对于文本中的特殊字符（如 %, #, &, _, {, }）需正确转义。\n",
-            self._pdf_compact_prompt_rules("- "),
+            self._pdf_compact_prompt_rules("- ", enabled=compact_prompt_rules),
             "5) 在 <solution> 最后必须加入：\\hfill$\\blacksquare$，确保这是最终结尾。\n",
             image_hint,
             "\n【题目/追问】\n" + (problem_text or "(无文字，仅图片)") + "\n",
@@ -1096,6 +1233,7 @@ class PdfMixin:
             issues: List[str],
             prev_tex_src: str = "",
             prev_raw: str = "",
+            compact_prompt_rules: Optional[bool] = None,
     ) -> str:
         """当 /pdf 的解答“未写完/漏答”时，构造“补全重写”提示词。"""
         issue_lines: List[str] = []
@@ -1130,7 +1268,7 @@ class PdfMixin:
 
         parts = [
             base,
-            self._pdf_compact_prompt_rules("6) ", "7) "),
+            self._pdf_compact_prompt_rules("6) ", "7) ", enabled=compact_prompt_rules),
             img_line,
             "【题目（用户输入/意图）】\n" + (problem_text or "(空)") + "\n\n",
             "【缺失点（请逐条修复）】\n" + issue_block + "\n\n",
@@ -1257,7 +1395,8 @@ class PdfMixin:
 
         try:
             timeout_sec = self._pdf_timeout_for_provider(provider)
-            call = self.context.llm_generate(
+            record_model_call(provider)
+            call = generate_with_token_usage(self,
                 chat_provider_id=provider,
                 prompt=prompt,
                 image_urls=[],
@@ -1349,7 +1488,8 @@ class PdfMixin:
 
         try:
             timeout_sec = self._pdf_timeout_for_provider(provider)
-            call = self.context.llm_generate(
+            record_model_call(provider)
+            call = generate_with_token_usage(self,
                 chat_provider_id=provider,
                 prompt=prompt,
                 image_urls=[],
@@ -1389,32 +1529,40 @@ class PdfMixin:
             self,
             question_text: str,
             ref_pdf_latex: str,
+            has_image: bool = False,
+            compact_prompt_rules: Optional[bool] = None,
     ) -> str:
-        """/pdf 引用上一份 PDF 追问时的提示词
-
-        """
+        """/pdf 追问提示词（携带整个追问线程的上下文）"""
         q = (question_text or "").strip()
         ref = (ref_pdf_latex or "").strip()
 
-        # 控制注入长度，避免 prompt 爆炸
-        max_ref_len = int(self._cfg("pdf_followup_ref_max_chars", 6000) or 6000)
+        # 默认不截断（0 = 不限制）；如需限制可配置 pdf_followup_ref_max_chars
+        max_ref_len = int(self._cfg("pdf_followup_ref_max_chars", 0) or 0)
         if max_ref_len > 0 and len(ref) > max_ref_len:
             ref = ref[:max_ref_len] + "\n...(已截断)"
 
+        img_note = (
+            "用户本次还附带了图片（可能是题目截图或对上一份 PDF 某处的截图），请结合图片内容回答。\n"
+            if has_image else ""
+        )
+        q_block = q if q else "（用户未写文字，请针对该题继续深入讲解或补全解答细节）"
+
         intro_text = (
-            "用户正在追问上一份 PDF 解答的相关问题。\n"
-            "下面提供上一份 PDF 的 LaTeX 源码（仅作参考上下文），请据此回答用户的追问，并仍然输出一份可编译的 LaTeX 正文片段。\n"
+            "用户正在追问之前 PDF 解答的相关问题。\n"
+            "下面提供本题的完整对话线程（原始题目 + 历次解答的 LaTeX 源码 + 历次追问），请据此回答用户的最新追问，"
+            "并仍然输出一份可编译的 LaTeX 正文片段。\n"
+            f"{img_note}"
             "\n"
-            "【上一份 PDF 的 LaTeX 源码】\n"
+            "【本题对话线程】\n"
             f"{ref}\n"
             "\n"
-            "【用户追问】\n"
-            f"{q}\n"
+            "【用户最新追问】\n"
+            f"{q_block}\n"
         )
 
         return (
             "你是数学题标准解答的排版与写作助手。\n"
-            "你的任务：基于用户追问 + 上一份 PDF 的 LaTeX 上下文，生成一份新的可编译 LaTeX 正文片段（中文可用）。\n"
+            "你的任务：基于用户最新追问 + 本题对话线程上下文，生成一份新的可编译 LaTeX 正文片段（中文可用）。\n"
             f"{intro_text}"
             "要求：\n"
             "1) 不要输出 \\\\documentclass、\\\\usepackage 等导言区内容，只输出正文片段。\n"
@@ -1430,7 +1578,7 @@ class PdfMixin:
             "   - 文本模式下不要出现裸的特殊符号：_, ^, 反斜杠(\\\\), %, &, #, <, > 等。\n"
             "   - 若要显示这些符号，请使用转义：\\\\_, \\\\textasciicircum{}, \\\\textbackslash{}, \\\\%, \\\\&, \\\\#, \\\\textless{}, \\\\textgreater{}。\n"
             "   - 下标/上标请放在数学环境中，例如 $x_1$, $a^2$。\n"
-            f"{self._pdf_compact_prompt_rules('7) 排版紧凑：', '   - ')}"
+            f"{self._pdf_compact_prompt_rules('7) 排版紧凑：', '   - ', enabled=compact_prompt_rules)}"
             "8) 输出格式必须严格如下（标签要保留；不要输出其它标签）：\n"
             "<problem>这里写追问对应的题意/子问题/知识点标题...</problem>\n"
             "<theorems>这里写 theoremBox/lemmaBox/formulaBox...</theorems>\n"
@@ -1521,26 +1669,14 @@ class PdfMixin:
 
                     cmd = ["xelatex", "-interaction=nonstopmode", "-halt-on-error", "-no-shell-escape", "document.tex"]
 
-                    loop = asyncio.get_running_loop()
-
                     # 默认只跑 1 次（更快）；若日志提示需要 rerun（交叉引用/目录等），再补跑第 2 次。
                     rerun_needed = False
                     last_returncode = 0
                     last_stdout = ""
                     for run_idx in range(2):
-                        # 放到线程池里跑，避免阻塞 asyncio 事件循环
-                        p = await loop.run_in_executor(
-                            None,
-                            lambda: subprocess.run(
-                                cmd,
-                                cwd=td,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                timeout=timeout_sec,
-                                check=False,
-                                env=env,
-                            ),
-                        )
+                        # Cancellation must stop/reap XeLaTeX before deleting its
+                        # working directory and releasing the concurrency slot.
+                        p = await run_process(cmd, cwd=td, env=env, timeout=timeout_sec)
                         last_returncode = int(getattr(p, "returncode", 0) or 0)
                         try:
                             last_stdout = (getattr(p, "stdout", b"") or b"").decode("utf-8", errors="ignore")
@@ -1585,7 +1721,7 @@ class PdfMixin:
                         return None
                     with open(pdf_path, "rb") as fpdf:
                         return fpdf.read()
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, asyncio.TimeoutError):
                 self._last_texlive_log = "Local xelatex timeout"
                 return None
             except Exception as e:

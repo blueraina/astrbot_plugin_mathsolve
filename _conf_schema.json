@@ -1,4 +1,27 @@
 {
+  "pdf_usage_report": {
+    "type": "object",
+    "description": "PDF 调用统计日报",
+    "hint": "各群独立统计。/pdf统计 可立即生成当天总结图；曲线对比当日与前一日 /pdf，右上角统计模型调用和 DeepThink。",
+    "items": {
+      "pdf_usage_report_enabled": {
+        "type": "bool", "description": "启用每日自动发送", "default": true,
+        "hint": "关闭只停止自动发送，仍会记录数据，仍可使用 /pdf统计。"
+      },
+      "pdf_usage_report_time": {
+        "type": "string", "description": "日报发送时间", "default": "00:00",
+        "hint": "24 小时制 HH:MM，使用 UTC+8。发送前一天 00:00 至 24:00 的统计。"
+      },
+      "pdf_usage_report_groups": {
+        "type": "list", "description": "自动发送群号名单", "default": [],
+        "hint": "留空则发送到已记录 PDF/DeepThink 任务的群；填写后只给名单中的群自动发送。手动指令始终只显示当前群。"
+      },
+      "pdf_usage_report_skip_empty": {
+        "type": "bool", "description": "无答疑记录时跳过发送", "default": true,
+        "hint": "当天没有 PDF/DeepThink 任务和模型调用时不发送空白日报。"
+      }
+    }
+  },
   "basic_math": {
     "type": "object",
     "description": "基础答疑",
@@ -13,9 +36,9 @@
       },
       "treat_image_as_math": {
         "type": "bool",
-        "description": "图片消息默认按数学题处理",
+        "description": "旧版图片自动解题选项（已停用）",
         "default": true,
-        "hint": "用户只发图片时也会进入完整图文解答流程",
+        "hint": "为避免普通看图聊天误发图片，新版不再仅凭图片接管。请随图明确说“解答这题”；本选项仅保留旧配置兼容，不再放行自动转图。",
         "obvious_hint": true
       },
       "full_solution_prefer_svg_diagram": {
@@ -161,6 +184,20 @@
       }
     }
   },
+  "markdown_generation": {
+    "type": "object",
+    "description": "Markdown 文档答疑",
+    "hint": "/md 与 /pdf 使用相同的主模型、GPT 关键词路由、候补模型和超时设置，直接生成 UTF-8 .md 文件，不进行 LaTeX 编译。支持题目文字、图片与引用。文件预览由 QQ 客户端完成，公式等语法支持取决于客户端版本。缓存沿用 PDF 缓存保留设置；不计入 /pdf 频率曲线。",
+    "items": {
+      "enable_md_output": {
+        "type": "bool",
+        "description": "启用 /md 指令",
+        "default": true,
+        "hint": "发送标准 Markdown 文件；不是聊天源码、截图或改后缀的 PDF。",
+        "obvious_hint": true
+      }
+    }
+  },
   "pdf_generation": {
     "type": "object",
     "description": "PDF 生成",
@@ -171,13 +208,6 @@
         "description": "启用 /pdf 指令",
         "default": true,
         "hint": "关闭后 /pdf 不可用；不影响普通 Markdown 转图片",
-        "obvious_hint": true
-      },
-      "pdf_enable_compact_prompt_rules": {
-        "type": "bool",
-        "description": "启用紧凑排版提示",
-        "default": true,
-        "hint": "减少不必要换行和行间公式，让 PDF 页数更紧凑",
         "obvious_hint": true
       },
       "pdf_provider_id": {
@@ -197,6 +227,38 @@
           "max": 600,
           "step": 10
         }
+      },
+      "pdf_provider_enable_compact_prompt_rules": {
+        "type": "bool",
+        "description": "主模型启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响主模型；减少不必要换行和行间公式",
+        "obvious_hint": true
+      },
+      "pdf_gpt_provider_id": {
+        "type": "string",
+        "description": "GPT 关键词指定模型",
+        "default": "",
+        "hint": "用户的 /pdf 输入包含 gpt（不区分大小写）时优先使用；留空则不启用关键词路由",
+        "_special": "select_provider"
+      },
+      "pdf_gpt_provider_timeout_sec": {
+        "type": "int",
+        "description": "GPT 指定模型超时（秒）",
+        "default": 180,
+        "hint": "0 表示不限制；失败后仍会按常规模型链回退",
+        "slider": {
+          "min": 0,
+          "max": 600,
+          "step": 10
+        }
+      },
+      "pdf_gpt_provider_enable_compact_prompt_rules": {
+        "type": "bool",
+        "description": "GPT 指定模型启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响通过 gpt 关键词选中的模型",
+        "obvious_hint": true
       },
       "pdf_enable_provider_preflight": {
         "type": "bool",
@@ -245,6 +307,13 @@
           "step": 10
         }
       },
+      "pdf_fallback_provider_enable_compact_prompt_rules_1": {
+        "type": "bool",
+        "description": "候补模型 1 启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响候补模型 1",
+        "obvious_hint": true
+      },
       "pdf_fallback_provider_id_2": {
         "type": "string",
         "description": "/pdf 候补模型 2",
@@ -262,6 +331,13 @@
           "max": 600,
           "step": 10
         }
+      },
+      "pdf_fallback_provider_enable_compact_prompt_rules_2": {
+        "type": "bool",
+        "description": "候补模型 2 启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响候补模型 2",
+        "obvious_hint": true
       },
       "pdf_fallback_provider_id_3": {
         "type": "string",
@@ -281,6 +357,13 @@
           "step": 10
         }
       },
+      "pdf_fallback_provider_enable_compact_prompt_rules_3": {
+        "type": "bool",
+        "description": "候补模型 3 启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响候补模型 3",
+        "obvious_hint": true
+      },
       "pdf_fallback_provider_id_4": {
         "type": "string",
         "description": "/pdf 候补模型 4",
@@ -299,6 +382,13 @@
           "step": 10
         }
       },
+      "pdf_fallback_provider_enable_compact_prompt_rules_4": {
+        "type": "bool",
+        "description": "候补模型 4 启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响候补模型 4",
+        "obvious_hint": true
+      },
       "pdf_fallback_provider_id_5": {
         "type": "string",
         "description": "/pdf 候补模型 5",
@@ -316,6 +406,13 @@
           "max": 600,
           "step": 10
         }
+      },
+      "pdf_fallback_provider_enable_compact_prompt_rules_5": {
+        "type": "bool",
+        "description": "候补模型 5 启用紧凑排版提示",
+        "default": true,
+        "hint": "只影响候补模型 5",
+        "obvious_hint": true
       },
       "pdf_fallback_on_compile_error": {
         "type": "bool",
@@ -465,12 +562,43 @@
     "description": "实验：SPDF DeepThink",
     "hint": "实验/高成本功能；控制 /spdf 多角色候选、Judge、质询、Python 验算、TikZ 预检和后处理。日常可先只用 /pdf。",
     "items": {
+      "spdf_session_max_tasks": {
+        "description": "每个会话同时运行的 Deepthink 任务上限",
+        "type": "int",
+        "default": 5,
+        "hint": "填写大于等于 1 的整数。群聊按群统计所有用户，私聊按用户独立统计；超限时拒绝新任务，不排队。仅限制 Deepthink，不影响 /pdf；时段白名单不豁免此限制。"
+      },
       "enable_spdf_output": {
         "type": "bool",
         "description": "启用 /spdf 指令",
         "default": true,
         "hint": "关闭后 /spdf 不可用；不影响 /pdf",
         "obvious_hint": true
+      },
+      "spdf_time_limit_enabled": {
+        "type": "bool",
+        "description": "启用 SPDF 每日开放时段限制",
+        "default": false,
+        "hint": "默认关闭。开启后仅在以下时段允许发起 /spdf；按北京时间判断。已开始的任务继续完成，不影响 /pdf。",
+        "obvious_hint": true
+      },
+      "spdf_allowed_start": {
+        "type": "string",
+        "description": "SPDF 开放开始时间（北京时间）",
+        "default": "08:00",
+        "hint": "24 小时制 HH:MM，例如 08:00。开始时刻可以使用。支持跨午夜，例如 22:00–08:00；开始与结束相同表示全天开放。"
+      },
+      "spdf_allowed_end": {
+        "type": "string",
+        "description": "SPDF 开放结束时间（北京时间）",
+        "default": "23:00",
+        "hint": "24 小时制 HH:MM，例如 23:00。到达结束时刻后不再接受新任务，正在进行的任务不受影响。"
+      },
+      "spdf_time_limit_exempt_qq": {
+        "type": "list",
+        "description": "SPDF 时间限制豁免 QQ 名单",
+        "default": [],
+        "hint": "每项填写一个 QQ 号，不填昵称或群号；名单内用户在任何时段均可使用 /spdf。仅豁免时间限制，不绕过“启用 /spdf 指令”总开关。"
       },
       "spdf_provider_id": {
         "type": "string",
@@ -1006,31 +1134,15 @@
           "step": 60
         }
       },
-      "pdf_reuse_last_image_with_text_mode": {
-        "type": "string",
-        "description": "文字追问时复用上一张图片",
-        "default": "smart",
-        "hint": "smart=仅像追问时复用；always=总是复用；never=永不复用",
-        "options": [
-          "smart",
-          "always",
-          "never"
-        ],
-        "labels": [
-          "智能判断（推荐）",
-          "总是复用",
-          "永不复用"
-        ]
-      },
-      "pdf_followup_text_max_len": {
+      "pdf_pending_image_window_sec": {
         "type": "int",
-        "description": "智能复用的短文本阈值",
-        "default": 40,
-        "hint": "短文本且不像新题时更容易判定为追问",
+        "description": "孤图有效时间窗（秒）",
+        "default": 300,
+        "hint": "用户单发一张图片后，在此时间内发 /pdf、/spdf 会自动使用该图；超时后需重发图片或引用图片消息",
         "slider": {
-          "min": 5,
-          "max": 200,
-          "step": 5
+          "min": 30,
+          "max": 1800,
+          "step": 30
         }
       },
       "stop_event_on_hint": {

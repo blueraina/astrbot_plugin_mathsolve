@@ -15,3 +15,15 @@ vendor/*
 !vendor/md2img/**
 index-*.html
 example_*-*.png
+
+# AstrBot runtime state (never publish deployment configuration or user data)
+/data/
+/plugin_data/
+/plugins_data/
+/_astrbot_plugin_data_*/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+.env.*

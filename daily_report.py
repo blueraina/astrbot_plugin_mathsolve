@@ -709,6 +709,7 @@ class DailyReportMixin:
 
         return "\n".join([
             r"\documentclass[UTF8]{ctexart}",
+            *build_pdf_cjk_font_preamble(title, "\n".join(body)),
             r"\usepackage[a4paper,margin=2.0cm]{geometry}",
             r"\usepackage{textcomp}",
             r"\usepackage{amsmath,amssymb,amsthm,mathtools,bm,mathrsfs,cancel}",

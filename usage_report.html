@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF 答疑日报</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#e9edf3;font-family:"PingFang SC","Noto Sans CJK SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#202d44;-webkit-font-smoothing:antialiased}
+#report{width:1280px;background:#fff;padding:48px 52px 32px;position:relative;overflow:hidden}
+#report:before{content:"";position:absolute;top:0;left:0;right:0;height:7px;background:linear-gradient(90deg,#547af6,#8b94ed 65%,#c0a8df)}
+.top{display:grid;grid-template-columns:1fr 430px;gap:40px;align-items:start}
+.brand{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:600;letter-spacing:2px;color:#657390;margin-bottom:28px}
+.brand svg{width:28px;height:28px}.sample{font-size:14px;letter-spacing:0;font-weight:500;padding:5px 10px;background:#fff5df;color:#8b6929;border-radius:6px;margin-left:10px}
+h1{font-size:46px;line-height:1.3;letter-spacing:1px;margin:0 0 12px;font-weight:650}.date{font-size:21px;color:#718098;letter-spacing:.25px}.date i{font-style:normal;margin:0 12px;color:#b7c0ce}
+.metric{margin-top:32px;display:flex;align-items:baseline;gap:13px}.metric .num{font-size:88px;font-weight:650;line-height:1.12;letter-spacing:-4px;font-variant-numeric:tabular-nums;color:#253651}.metric .unit{font-size:25px;font-weight:500}.metric-label{font-size:18px;color:#8590a3;letter-spacing:.5px;margin-top:3px}
+.breakdown{display:flex;gap:25px;font-size:19px;color:#596b84;margin-top:20px;align-items:center}.breakdown span{display:flex;align-items:center;gap:9px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#5077ee}.dot.deep{background:#a185d1}.breakdown b{font-weight:600;color:#2f405b;font-variant-numeric:tabular-nums}
+.models{background:#f6f8fc;border:1px solid #e6ebf3;border-radius:17px;padding:22px 24px 18px}.models-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:13px}.models-head strong{font-size:20px;font-weight:600}.models-head small{font-size:15px;color:#8290a7}
+.model-row{display:flex;align-items:baseline;justify-content:space-between;gap:18px;padding:6px 0;line-height:1.45}.model-name{font-size:18px;color:#52637d;overflow-wrap:anywhere;min-width:0}.model-count{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;color:#31455f}.model-count small{font-size:14px;font-weight:400;margin-left:7px;color:#91a0b2}.model-name em{font-style:normal;color:#8a97aa;font-size:14px;margin-left:6px}
+.deep-row{border-top:1px solid #e1e7f0;margin-top:11px;padding-top:14px;display:flex;align-items:center;justify-content:space-between}.deep-name{display:flex;align-items:center;gap:8px;font-size:18px;font-weight:500}.deep-count{font-variant-numeric:tabular-nums;font-size:24px;font-weight:600}.deep-count small{font-size:14px;font-weight:400;color:#8a97aa;margin-left:7px}
+.chart-section{margin-top:35px;border-top:1px solid #e8edf4;padding-top:29px}.chart-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}.chart-title{font-size:25px;font-weight:600;letter-spacing:.2px}.legend{display:flex;gap:24px;font-size:17px;color:#60718a;align-items:center}.legend span{display:flex;gap:9px;align-items:center}.line-key{display:inline-block;width:23px;height:3px;background:#5077ee;border-radius:9px}.line-key.deep{background:#a185d1}
+#chart{display:block;width:100%;height:350px;overflow:visible}.chart-bottom{display:flex;justify-content:space-between;margin:3px 5px 0 65px;font-size:16px;color:#8994a6}.chart-bottom strong{font-size:16px;font-weight:500;color:#677890}
+.footer{margin-top:29px;border-top:1px solid #e8edf4;padding-top:21px;display:flex;justify-content:space-between;align-items:flex-start;gap:20px;color:#8994a6;font-size:15px;line-height:1.65}.footer .left{max-width:875px}.footer .stamp{white-space:nowrap;text-align:right;font-size:15px;color:#72809a}.footer .stamp b{font-weight:600;letter-spacing:1.5px;font-size:13px;color:#a1adbf}
+</style>
+</head>
+<body>
+<article id="report" aria-label="PDF 答疑日报，当日与前一日每小时 PDF 任务数对比">
+  <div class="top">
+    <header>
+      <div class="brand"><svg viewBox="0 0 28 28" fill="none" aria-hidden="true"><rect width="28" height="28" rx="8" fill="#eef2ff"/><path d="M7 20V8h14M8 18l5-6 4 3 4-7" stroke="#617fe6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>ASTRBOT MATH<span class="sample" id="sample">样图 · 模拟数据</span></div>
+      <h1>PDF 答疑日报</h1>
+      <div class="date" id="date"></div>
+      <div class="metric"><span class="num" id="total">—</span><span class="unit">次 /pdf 答疑</span></div>
+      <div class="breakdown"><span>前一日 <b id="previous-total">—</b></span><span id="until"></span></div>
+    </header>
+    <aside class="models" aria-label="模型调用次数和 DeepThink 任务次数">
+      <div class="models-head"><strong>模型调用</strong><small>按插件调用计次</small></div>
+      <div id="models"></div>
+      <div class="deep-row"><span class="deep-name"><i class="dot deep"></i>DeepThink</span><span class="deep-count"><span id="deep-calls">—</span><small>个任务</small></span></div>
+    </aside>
+  </div>
+  <section class="chart-section">
+    <div class="chart-head"><div class="chart-title">24 小时 /pdf 答疑频率</div><div class="legend"><span><i class="line-key"></i><span id="current-legend"></span></span><span><i class="line-key deep"></i><span id="previous-legend"></span></span></div></div>
+    <svg id="chart" viewBox="0 0 1176 350" role="img" aria-label="00:00 到 24:00 的每小时 PDF 指令任务数"></svg>
+    <div class="chart-bottom"><span>按任务发起时间计次 · 每小时一格</span><strong id="coverage"></strong></div>
+  </section>
+  <footer class="footer"><div class="left"><span id="note"></span><br>模型调用含 PDF / DeepThink 的生成、校验及重试，不含连通性预检；失败任务也计次。</div><div class="stamp">各群独立统计<br><b>DAILY MATH REPORT</b></div></footer>
+</article>
+<script>
+const supplied = /*__REPORT_DATA__*/null;
+const data = supplied || {day:'2026-10-06',previous_day:'2026-10-05',group_label:'数学答疑群',sample:true,pdf:[2,1,0,0,0,0,1,2,5,6,8,6,4,3,5,7,9,11,16,13,9,5,3,0],previous:[1,0,0,0,0,0,0,2,4,8,6,5,7,4,3,6,10,8,12,10,6,5,3,2],pdf_total:116,deep_total:8,until:'24:00',live:false,partial:false,models:[{name:'Gemini 3 Flash · 校验',count:126},{name:'Gemini 3.8 Flash High',count:91},{name:'GPT 6.1 Sol · xhigh',count:26},{name:'Gemini Pro Agent',count:19},{name:'GPT 6 Astra',count:18},{name:'GPT 6.1 Sol · max',count:8}]};
+const pdf=data.pdf, previous=data.previous, sum=a=>a.reduce((s,n)=>s+(n||0),0), text=(id,t)=>document.getElementById(id).textContent=t;
+document.getElementById('sample').hidden=!data.sample;
+text('date',data.day.replaceAll('-','.')+' · '+data.group_label);
+text('total',data.pdf_total);text('deep-calls',data.deep_total);
+text('previous-total',previous.every(v=>v===null)?'未记录':sum(previous)+' 次'+(previous.some(v=>v===null)?'（部分）':''));
+text('until','统计至 '+data.until);
+text('current-legend',(data.live?'今天':data.day.slice(5).replace('-','.'))+' /pdf');
+text('previous-legend',(data.live?'昨天':data.previous_day.slice(5).replace('-','.'))+' /pdf');
+text('coverage',data.live?'当前小时尚未结束':'统计区间 00:00 — 24:00');
+let note=data.partial?'时间明细从 '+data.tracked_since+' 开始记录；更早时段留空，历史总数仍保留。':'DeepThink 只在右上角统计，不计入下方曲线。';
+if(previous.every(v=>v===null))note+=' 前一日暂无明细。';
+if(data.live)note+=' 未到时段留空。';
+text('note',note);
+const modelBox=document.getElementById('models');
+for(const model of data.models){const row=document.createElement('div');row.className='model-row';const name=document.createElement('span');name.className='model-name';name.textContent=model.name;const count=document.createElement('span');count.className='model-count';count.textContent=model.count;const unit=document.createElement('small');unit.textContent='次';count.append(unit);row.append(name,count);modelBox.append(row);}
+if(!data.models.length){modelBox.textContent='暂无模型调用记录';modelBox.style.cssText='color:#8290a7;font-size:18px;padding:16px 0';}
+const svg=document.getElementById('chart'), NS='http://www.w3.org/2000/svg';
+function add(tag, attrs, text, parent=svg){const n=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;parent.appendChild(n);return n;}
+const defs=add('defs',{}), grad=add('linearGradient',{id:'fill-blue',x1:'0',y1:'0',x2:'0',y2:'1'},undefined,defs);
+add('stop',{offset:'0%','stop-color':'#6486f5','stop-opacity':'.18'},undefined,grad);add('stop',{offset:'100%','stop-color':'#6486f5','stop-opacity':'.012'},undefined,grad);
+const L=65,R=1147,T=48,B=306,rawMax=Math.max(...pdf.map(v=>v||0),...previous.map(v=>v||0),1),step=rawMax<=4?1:rawMax<=20?5:Math.pow(10,Math.floor(Math.log10(rawMax))),max=Math.ceil(rawMax*1.25/step)*step;
+const x=h=>L+(h/24)*(R-L), y=n=>B-(n/max)*(B-T);
+add('text',{x:L,y:16,fill:'#8995a7','font-size':16},'任务数');
+for(let v=0;v<=max;v+=step){add('line',{x1:L,x2:R,y1:y(v),y2:y(v),stroke:v===0?'#dfe6f1':'#eef1f6','stroke-width':1});add('text',{x:L-18,y:y(v)+6,'text-anchor':'end',fill:'#8591a5','font-size':17},String(v));}
+for(let h=0;h<=24;h+=3){add('text',{x:x(h),y:337,'text-anchor':h===0?'start':h===24?'end':'middle',fill:'#8591a5','font-size':17},String(h).padStart(2,'0')+':00');}
+function segments(a){const out=[];let part=[];a.forEach((v,i)=>{if(v===null){if(part.length)out.push(part);part=[];}else part.push([i,v]);});if(part.length)out.push(part);return out;}
+function path(a){return a.map(([h,v],i)=>(i===0?'M':'L')+x(h+.5).toFixed(2)+','+y(v).toFixed(2)).join(' ');}
+for(const a of segments(pdf)){add('path',{d:path(a)+' L'+x(a.at(-1)[0]+.5)+','+B+' L'+x(a[0][0]+.5)+','+B+' Z',fill:'url(#fill-blue)'});}
+for(const a of segments(previous)){add('path',{d:path(a),fill:'none',stroke:'#a185d1','stroke-width':2.6,'stroke-linecap':'round','stroke-linejoin':'round'});}
+for(const a of segments(pdf)){add('path',{d:path(a),fill:'none',stroke:'#5077ee','stroke-width':3.5,'stroke-linecap':'round','stroke-linejoin':'round'});}
+for(let i=0;i<24;i++){if(previous[i]!==null)add('circle',{cx:x(i+.5),cy:y(previous[i]),r:2.5,fill:'#a185d1'});if(pdf[i]!==null)add('circle',{cx:x(i+.5),cy:y(pdf[i]),r:3.2,fill:'#fff',stroke:'#5077ee','stroke-width':1.7});}
+const peak=pdf.indexOf(Math.max(...pdf.map(v=>v||0)));
+if(peak>=0 && pdf[peak]>0){const px=x(peak+.5),py=y(pdf[peak]),labelX=Math.max(L+125,Math.min(R-125,px)),labelY=Math.max(17,py-53);add('circle',{cx:px,cy:py,r:9,fill:'#5077ee','fill-opacity':'.14'});add('circle',{cx:px,cy:py,r:4.5,fill:'#5077ee',stroke:'#fff','stroke-width':2});add('rect',{x:labelX-125,y:labelY,width:250,height:34,rx:8,fill:'#eef3ff'});add('text',{x:labelX,y:labelY+23,'text-anchor':'middle',fill:'#4765ba','font-size':17,'font-weight':500},String(peak).padStart(2,'0')+':00–'+String(peak+1).padStart(2,'0')+':00 高峰 · '+pdf[peak]+' 次');}
+if(pdf.every(v=>v===null)&&previous.every(v=>v===null))add('text',{x:(L+R)/2,y:170,'text-anchor':'middle',fill:'#8591a5','font-size':21},'暂无小时明细，开始记录后将在这里显示');
+window.reportData=data;window.reportReady=true;
+</script>
+</body>
+</html>

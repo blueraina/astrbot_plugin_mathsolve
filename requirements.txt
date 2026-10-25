@@ -1,2 +1,5 @@
 mistune>=3.0
 playwright>=1.40
+pypdf>=4.0
+reportlab>=4.0
+PyMuPDF>=1.24

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 try:
     from .shared import *
+    from .image_reply_policy import image_reply_decision, plain_reply_text, image_tool_already_sent
 except ImportError:
     from shared import *
+    from image_reply_policy import image_reply_decision, plain_reply_text, image_tool_already_sent
 
 
 class RenderMixin:
@@ -38,14 +40,18 @@ class RenderMixin:
         return cur >= start or cur < end
 
     async def _process_text_with_markdown(self, text: str, event: AstrMessageEvent = None) -> List[Any]:
+        decision = image_reply_decision(event)
+        if not decision.allowed or image_tool_already_sent(event):
+            plain = plain_reply_text(text)
+            return [Plain(plain)] if plain else []
+
         if "<md>" not in text:
             is_complex = re.search(r"(```|\$\$|\|.*?\|.*?\||\\begin\{)", text, re.DOTALL)
-            if is_complex:
+            if is_complex or decision.image_requested:
                 text = f"<md>\n{text}\n</md>"
 
-        user_mode = "mobile"
-        if event:
-            user_mode = get_user_mode(event)
+        # 所有普通 Markdown 渲染也走统一解析；用户 /pc、/pe 设置始终最高优先级。
+        user_mode = resolve_render_mode(event)
 
         components: List[Any] = []
         parts = re.split(r"(<md>.*?</md>)", text, flags=re.DOTALL)
@@ -229,24 +235,24 @@ class RenderMixin:
                 border: 1px solid var(--gold);
                 border-left: 4px solid var(--gold);
                 border-radius: 7px;
-                background: linear-gradient(180deg, var(--gold-soft), #fff9e8);
-                box-shadow: inset 0 1px 0 rgba(255,255,255,0.65);
+                background: #FFF9E9;
+                box-shadow: none;
                 page-break-inside: avoid;
             }}
             /* 三色轮换 class 由模板内脚本按 nth-of-type 语义打上；
                不能直接用 :nth-of-type(3n+2)，An+B 选择器会让 PagedJS 的 CSS 解析崩溃 */
             blockquote.bq-cycle-2 {{
-                background: var(--green-soft);
+                background: #F3F9F4;
                 border-color: var(--green);
                 border-left: 4px solid var(--green);
             }}
             blockquote.bq-cycle-0 {{
-                background: var(--blue-soft);
+                background: #F2F7FD;
                 border-color: var(--blue);
                 border-left: 4px solid var(--blue);
             }}
             blockquote:has(> p:first-child [data-card="problem"]) {{
-                background: linear-gradient(180deg, #eef6ff, #f7fbff);
+                background: #F2F7FD;
                 border-color: var(--blue);
                 border-left: 4px solid var(--blue);
                 text-align: left;
@@ -504,27 +510,35 @@ class RenderMixin:
             own_pw_cm = async_playwright()
 
         if own_pw_cm is not None:
-            async with own_pw_cm as p:
-                browser = await p.chromium.launch()
-                generated_images = await self._render_with_browser(browser, full_html, output_image_path, scale, mode,
-                                                                   is_mobile_css)
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            return generated_images
+            async with owned(own_pw_cm.start, lambda p: p.stop()) as p:
+                async with owned(p.chromium.launch, lambda b: b.close()) as browser:
+                    return await self._render_with_browser(browser, full_html, output_image_path, scale, mode,
+                                                           is_mobile_css)
 
         # shared browser path
         return await self._render_with_browser(browser, full_html, output_image_path, scale, mode, is_mobile_css)
 
     async def _render_with_browser(self, browser, full_html: str, output_image_path: str, scale: int, mode: str,
                                    is_mobile_css: bool) -> List[str]:
-        generated_images: List[str] = []
-
         vp_width = (794 if mode == "pc" else 760) + 50
-        context = await browser.new_context(
-            device_scale_factor=scale, viewport={"width": vp_width, "height": 2000}
-        )
+        render_html_path = os.path.splitext(output_image_path)[0] + '.' + uuid.uuid4().hex + '.html'
+        try:
+            async with owned(
+                lambda: browser.new_context(device_scale_factor=scale, viewport={"width": vp_width, "height": 2000}),
+                lambda context: context.close(),
+            ) as context:
+                return await self._render_with_context(context, full_html, output_image_path, mode,
+                                                       is_mobile_css, render_html_path)
+        finally:
+            # Only this invocation's uniquely named HTML; never historical PDFs/images.
+            try:
+                os.remove(render_html_path)
+            except OSError:
+                pass
+
+    async def _render_with_context(self, context, full_html: str, output_image_path: str, mode: str,
+                                   is_mobile_css: bool, render_html_path: str) -> List[str]:
+        generated_images: List[str] = []
         page = await context.new_page()
 
         def _on_page_error(err):
@@ -539,8 +553,6 @@ class RenderMixin:
 
         page.on("pageerror", _on_page_error)
         page.on("console", _on_console)
-        render_html_path = ""
-
         try:
             render_timeout_sec = int(self._cfg("playwright_render_timeout_sec", 60) or 60)
         except Exception:
@@ -556,7 +568,6 @@ class RenderMixin:
         if wait_until not in valid_wait_until:
             logger.warning(f"[md2img] invalid playwright_wait_until={wait_until!r}, fallback to networkidle")
             wait_until = "networkidle"
-        render_html_path = os.path.splitext(output_image_path)[0] + ".html"
         os.makedirs(os.path.dirname(render_html_path), exist_ok=True)
         with open(render_html_path, "w", encoding="utf-8") as f:
             f.write(full_html)
@@ -723,16 +734,5 @@ class RenderMixin:
                         await _restore_original_content_screenshot("PagedJS did not create pages")
                 else:
                     await _restore_original_content_screenshot("PagedJS did not create pages")
-
-        try:
-            await page.close()
-            await context.close()
-        except Exception:
-            pass
-        if render_html_path:
-            try:
-                os.remove(render_html_path)
-            except OSError:
-                pass
 
         return generated_images
