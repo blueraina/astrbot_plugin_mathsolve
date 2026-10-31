@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
@@ -19,12 +19,17 @@ class FakeEvent:
     def __init__(self, user_id="10001", raw_message=None):
         self._user_id = user_id
         self.raw_message = raw_message
-        # Rendering-mode tests need an explicit image request under the current
-        # intent policy; an empty turn deliberately stays a text-only reply.
-        self.message_str = "请生成图片回复"
+        self.message_str = "请用图片回复"
+        self._extra = {}
 
     def get_sender_id(self):
         return self._user_id
+
+    def get_extra(self, key):
+        return self._extra.get(key)
+
+    def set_extra(self, key, value):
+        self._extra[key] = value
 
 
 class FakeAgentContext:

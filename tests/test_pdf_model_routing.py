@@ -137,9 +137,8 @@ class PdfModelRoutingTests(unittest.TestCase):
         compact = harness._build_pdf_latex_prompt("x=1", compact_prompt_rules=True)
         normal = harness._build_pdf_latex_prompt("x=1", compact_prompt_rules=False)
 
-        rule = "只有必要的行间公式才使用 $$...$$ 语法，其余公式都使用行内公式 $...$"
-        self.assertIn(rule, compact)
-        self.assertNotIn(rule, normal)
+        self.assertIn("其余公式都使用行内公式", compact)
+        self.assertNotIn("其余公式都使用行内公式", normal)
 
     def test_webui_exposes_compact_switch_for_every_pdf_model_slot(self):
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"

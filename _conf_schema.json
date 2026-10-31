@@ -1,4 +1,29 @@
 {
+  "personal_grading": {
+    "type": "object",
+    "description": "个人作答批改本",
+    "hint": "/批改：一次提交一个编号，同一用户跨群/私聊共用。长期保存 TeX、红字批注与修改历史，不保存原图；/批改 导出 获取整本 PDF。知识库只检索当前用户本人的记录。",
+    "items": {
+      "enable_grading": {"type": "bool", "description": "启用个人作答批改", "default": true},
+      "grading_provider_id": {
+        "type": "string", "description": "批改与薄弱项分析模型", "default": "",
+        "hint": "独立于 /pdf 模型。留空跟随当前会话模型；处理图片时请选择支持视觉输入的模型。",
+        "_special": "select_provider"
+      },
+      "grading_timeout_sec": {
+        "type": "int", "description": "批改模型超时（秒）", "default": 240,
+        "slider": {"min": 30, "max": 600, "step": 30}
+      },
+      "grading_embedding_provider_id": {
+        "type": "string", "description": "作答知识库嵌入模型 ID", "default": "",
+        "hint": "填写 AstrBot 服务提供商中 Embedding 模型的 ID，不是聊天模型。留空时仍可批改、导出和关键词检索；配置后后台自动索引首次作答和当前订正版。更换模型后自动重建。"
+      },
+      "grading_retrieval_top_k": {
+        "type": "int", "description": "个人知识库检索片段数", "default": 8,
+        "slider": {"min": 1, "max": 20, "step": 1}
+      }
+    }
+  },
   "pdf_usage_report": {
     "type": "object",
     "description": "PDF 调用统计日报",

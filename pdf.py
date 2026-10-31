@@ -389,6 +389,20 @@ class PdfMixin(QqImageRecoveryMixin):
     async def _pdf_snapshot_image_urls(self, image_urls: Optional[List[str]],
                                       event: Optional[AstrMessageEvent] = None) -> List[str]:
         """在 /pdf 模型链开始前固定图片输入，并转成 data URI 交给视觉模型。"""
+        # Grading's input images are transient, including natural-language
+        # Agent calls prepared before the grading tool itself runs.
+        if event is not None and not getattr(self, "_grading_snapshot_proxy", False):
+            try:
+                from .grading import grading_intent
+            except ImportError:
+                from grading import grading_intent
+            if grading_intent(event):
+                import copy
+                with tempfile.TemporaryDirectory(prefix="mathsolve_grade_snapshot_") as temp:
+                    proxy = copy.copy(self)
+                    proxy.IMAGE_CACHE_DIR = temp
+                    proxy._grading_snapshot_proxy = True
+                    return await proxy._pdf_snapshot_image_urls(image_urls, event=event)
         urls = [str(u or "").strip() for u in (image_urls or []) if str(u or "").strip()]
         if not urls:
             return urls
@@ -416,22 +430,39 @@ class PdfMixin(QqImageRecoveryMixin):
             try:
                 if self._pdf_is_http_image_url(u):
                     try:
-                        local_path = await loop.run_in_executor(
-                            None, lambda url=u: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
-                        )
+                        if getattr(self, "_grading_snapshot_proxy", False):
+                            try:
+                                from .grading import finish_io
+                            except ImportError:
+                                from grading import finish_io
+                            local_path = await finish_io(self._pdf_download_image_sync, u, timeout_sec, max_bytes)
+                        else:
+                            local_path = await loop.run_in_executor(
+                                None, lambda url=u: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
+                            )
                     except Exception as download_error:
                         if getattr(download_error, "code", None) not in (400, 401, 403) or not qq_image_parts(u):
                             raise
                         refreshed = await self._pdf_refresh_qq_image_url(u, event, timeout_sec)
-                        local_path = await loop.run_in_executor(
-                            None, lambda url=refreshed: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
-                        )
+                        if getattr(self, "_grading_snapshot_proxy", False):
+                            local_path = await finish_io(self._pdf_download_image_sync, refreshed, timeout_sec, max_bytes)
+                        else:
+                            local_path = await loop.run_in_executor(
+                                None, lambda url=refreshed: self._pdf_download_image_sync(url, timeout_sec, max_bytes),
+                            )
                         logger.info("/pdf QQ 图片凭证已自动刷新，图片下载恢复")
                 else:
-                    local_path = await loop.run_in_executor(
-                        None,
-                        lambda url=u: self._pdf_copy_local_image_sync(url),
-                    )
+                    if getattr(self, "_grading_snapshot_proxy", False):
+                        try:
+                            from .grading import finish_io
+                        except ImportError:
+                            from grading import finish_io
+                        local_path = await finish_io(self._pdf_copy_local_image_sync, u)
+                    else:
+                        local_path = await loop.run_in_executor(
+                            None,
+                            lambda url=u: self._pdf_copy_local_image_sync(url),
+                        )
                 data_uri = self._pdf_image_path_to_data_uri(local_path)
                 if data_uri not in out:
                     out.append(data_uri)

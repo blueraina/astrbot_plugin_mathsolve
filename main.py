@@ -21,6 +21,8 @@ try:
     from .markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
     from .markdown_command import MarkdownMixedMessageFilter
     from .pdf_theme_commands import PdfThemeMixin
+    from .grading import GradingMixin, GradingError, grading_intent
+    from .group_message_gate import GroupMessageGate, group_key
     from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence
 except ImportError:
     from shared import *
@@ -36,6 +38,8 @@ except ImportError:
     from markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
     from markdown_command import MarkdownMixedMessageFilter
     from pdf_theme_commands import PdfThemeMixin
+    from grading import GradingMixin, GradingError, grading_intent
+    from group_message_gate import GroupMessageGate, group_key
     from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence
 
 
@@ -397,20 +401,66 @@ class Md2ImgSolveMathMdTool(FunctionTool[AstrAgentContext]):
         return json.dumps(result, ensure_ascii=False)
 
 
+@dataclass
+class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
+    name: str = "mathsolve_grading"
+    description: str = (
+        "用户明确要求批改、记录作答、查看/修改自己的题目、导出作答本、检索或分析薄弱项时使用。"
+        "每个用户跨群共用独立作答本，一次提交一个编号。submit 忠实读取本轮原始文字/图片/引用，"
+        "生成逐步红字批注并保存；禁止把你生成的解答当用户作答。get 按题号发送题干作答批注图片；"
+        "modify 只改指定题号并保留历史；export 发送最新整本PDF；search 检索本人记录；"
+        "analyze 分析有题号证据的薄弱项；history 查看版本记录。禁止猜测别人的身份或题号。"
+    )
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["submit", "get", "modify", "export", "search", "analyze", "history"]},
+            "number": {"type": "integer", "minimum": 1, "description": "get/modify/history 必填，用户本人的题号"},
+            "text": {"type": "string", "description": "modify 的用户修改要求、search 的关键词或 analyze 的关注点；submit 不需填，程序直接读取原始消息"},
+        },
+        "required": ["action"],
+    })
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        plugin = _md2img_get_plugin()
+        _, event = _md2img_tool_extract_ctx_event(context)
+        try:
+            action = str(kwargs.get("action") or "")
+            number = kwargs.get("number")
+            if action in {"get", "modify", "history"} and (isinstance(number, bool) or not isinstance(number, int) or number < 1):
+                raise GradingError("请指定有效的正整数题号")
+            text = str(kwargs.get("text") or "").strip()
+            if action in {"modify", "search"} and not text:
+                raise GradingError("请提供修改要求或检索关键词")
+            if action == "submit":
+                text = str(getattr(event, "message_str", "") or "").strip()
+            result = await plugin._grading_run(event, action, number, text)
+            return json.dumps(result, ensure_ascii=False)
+        except GradingError as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        except asyncio.TimeoutError:
+            return json.dumps({"ok": False, "error": "批改模型超时，未完成的修改不会覆盖旧记录"}, ensure_ascii=False)
+        except Exception as exc:
+            logger.error("[mathsolve grading] Agent 工具调用失败: %s", type(exc).__name__, exc_info=True)
+            return json.dumps({"ok": False, "error": "操作未完成，可按题号查询已保存的记录或导出作答本"}, ensure_ascii=False)
+
+
 # 插件定义
 # -------------------------------------------------------------------------
 @register(
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.17.3",
+    "1.18.4",
 )
-class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
+class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
         self.config: Dict[str, Any] = dict(config) if isinstance(config, dict) else {}
+        self._group_message_gate = GroupMessageGate(self.get_kv_data, self.put_kv_data)
 
         self.DATA_DIR = _safe_get_data_dir()
+        self._grading_init()
         self.IMAGE_CACHE_DIR = os.path.join(self.DATA_DIR, "md2img_cache")
         self.PDF_CACHE_DIR = os.path.join(self.DATA_DIR, "md2img_pdf_cache")
         self.TEXLIVE_CACHE_DIR = os.path.join(self.PDF_CACHE_DIR, "_texlive_cache")
@@ -455,8 +505,9 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
                 Md2ImgSolveMathPdfTool(),
                 Md2ImgSolveMathSpdfTool(),
                 Md2ImgSolveMathMdTool(),
+                MathsolveGradingTool(),
             )
-            logger.info("[md2img] 已注册 LLM Tools: md2img_render_markdown / md2img_solve_math_pdf / md2img_solve_math_spdf / md2img_solve_math_md")
+            logger.info("[md2img] 已注册 LLM Tools: md2img_render_markdown / md2img_solve_math_pdf / md2img_solve_math_spdf / md2img_solve_math_md / mathsolve_grading")
         except Exception as e:
             try:
                 tool_mgr = self.context.provider_manager.llm_tools
@@ -464,6 +515,7 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
                 tool_mgr.func_list.append(Md2ImgSolveMathPdfTool())
                 tool_mgr.func_list.append(Md2ImgSolveMathSpdfTool())
                 tool_mgr.func_list.append(Md2ImgSolveMathMdTool())
+                tool_mgr.func_list.append(MathsolveGradingTool())
                 logger.info("[md2img] 已通过旧版接口注册 LLM Tools")
             except Exception as e2:
                 logger.warning(f"[md2img] 注册 LLM Tools 失败（不影响其它功能）: {e} / {e2}")
@@ -484,6 +536,8 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
         return default
 
     async def initialize(self):
+        await self._group_message_gate.load()
+        self._group_message_gate.install()
         try:
             await retire_legacy_instances(self)
             os.makedirs(self.IMAGE_CACHE_DIR, exist_ok=True)
@@ -503,12 +557,14 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
             self._start_cache_cleaner()
             self._start_daily_report_scheduler()
             self._start_usage_report_scheduler()
+            self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.17.3 - PDF 紧凑排版提示精简)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.4 - 批改输出格式兼容修复)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
     async def terminate(self):
+        self._group_message_gate.uninstall()
         await release_instance_resources(self)
 
     def _schedule_playwright_chromium_install(self, reason: str = "") -> None:
@@ -588,6 +644,10 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
     # === 全局消息监听：记录用户最后发的图片 & 活跃时间 ===
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
+        if grading_intent(event):
+            return  # Grading resolves its own transient inputs; no archive of originals.
+        if re.fullmatch(r"\s*/?(?:elmute|elstart)\s*", str(getattr(event, "message_str", "") or "")):
+            return  # 管理指令不参与题目图片和对话上下文入库。
         if re.fullmatch(r"\s*/?pdf主题(?:概览)?(?:\s+[\s\S]*)?\s*",
                         str(getattr(event, "message_str", "") or "")):
             return  # Theme UI must not consume/clear pending question images.
@@ -1438,6 +1498,44 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
             self._log_pdf_file_send_failure(label, pdf_path, fname, e)
             return None, self._pdf_file_send_failure_message(pdf_path, fname, e, label=label)
 
+    async def _set_group_receiving(self, event: AstrMessageEvent, enabled: bool):
+        # Also enforce permission when invoked directly, not just by the dispatcher.
+        if not event.is_admin():
+            event.stop_event()
+            return
+        if group_key(event) is None:
+            await event.send(event.plain_result("请在需要设置的群聊中使用此指令。"))
+            event.stop_event()
+            return
+        try:
+            changed = await self._group_message_gate.set_muted(event, not enabled)
+        except Exception:
+            logger.exception("[mathsolve] 保存群消息接收开关失败，保留原状态")
+            await event.send(event.plain_result("保存失败，原接收状态未改变，请稍后重试。"))
+            event.stop_event()
+            return
+        if enabled:
+            message = "✅ 已恢复接收本群消息。" if changed else "本群当前已开启消息接收。"
+        else:
+            message = ("🔕 已停止接收本群的新消息。" if changed else "本群当前已关闭消息接收。")
+            message += "机器人管理员发送 /elstart 可恢复；其他群和私聊不受影响。"
+        try:
+            await event.send(event.plain_result(message))
+        finally:
+            event.stop_event()  # 不继续触发聊天、图片答疑或其他插件。
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("elmute", priority=100000)
+    async def cmd_elmute(self, event: AstrMessageEvent):
+        """关闭当前群的新消息接收（仅机器人管理员，跨重载保留）。"""
+        await self._set_group_receiving(event, False)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("elstart", priority=100000)
+    async def cmd_elstart(self, event: AstrMessageEvent):
+        """恢复当前群的消息接收（仅机器人管理员）。"""
+        await self._set_group_receiving(event, True)
+
     # === 快捷指令 1: PC 模式 ===
     @filter.command("pc")
     async def cmd_pc(self, event: AstrMessageEvent):
@@ -1643,6 +1741,16 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
     @filter.custom_filter(MarkdownMixedMessageFilter)
     async def cmd_md(self, event: AstrMessageEvent):
         work = self._md_command(event)
+        try:
+            async for result in work:
+                yield result
+        finally:
+            await work.aclose()
+
+    @filter.command("批改")
+    @filter.custom_filter(MarkdownMixedMessageFilter)
+    async def cmd_grading(self, event: AstrMessageEvent):
+        work = self._grading_command(event)
         try:
             async for result in work:
                 yield result
@@ -2044,6 +2152,9 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
 
     @filter.on_llm_request()
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
+        if event.get_extra("mathsolve_grading_generation"):
+            self._disable_llm_tools_in_req(req)
+            return
         if event.get_extra("md2img_pdf_theme_command"):
             return
         forward_status = await prepare_forward_reply_evidence(event)
@@ -2073,6 +2184,14 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
         except Exception:
             pass
 
+        if grading_intent(event):
+            req.system_prompt = str(getattr(req, "system_prompt", "") or "") + (
+                "\n用户正在请求个人作答批改/查询/修改/分析。优先使用 mathsolve_grading 工具。"
+                "submit 由工具读取用户原始消息与图片，不要用你生成的解答替换原作答。"
+                "工具已发送图片/PDF时仅简短确认，不再调用通用图片或PDF解题工具。"
+                "分析薄弱项必须先调用本人工具取得带题号的依据，不得凭印象编造。"
+            )
+            return
         user_text = (getattr(event, "message_str", "") or "").strip()
         # Permission belongs to this user turn, never to an old math session or
         # to Markdown/tool arguments invented by the model.
@@ -2397,6 +2516,11 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
     # ---------- LLM响应：full 强制 <md>；hint 预计算提示流 ----------
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
+        if event.get_extra("mathsolve_grading_generation") or event.get_extra("mathsolve_grading_command"):
+            return
+        if grading_intent(event):
+            resp.completion_text = plain_reply_text(resp.completion_text or "")
+            return
         if event.get_extra("md2img_pdf_theme_command"):
             return
         if event.get_extra("md2img_pdf_generation") or event.get_extra("mathsolve_md_generation"):
@@ -2513,6 +2637,8 @@ class MarkdownConverterPlugin(PdfThemeMixin, MarkdownOutputMixin, UsageReportMix
     # ---------------- 装饰结果：hint 逐条消息；否则 Markdown->图片 ----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
+        if event.get_extra("mathsolve_grading_command") or grading_intent(event):
+            return
         if event.get_extra("md2img_pdf_theme_command"):
             return
         if event.get_extra("mathsolve_md_generation") or markdown_document_requested(event):

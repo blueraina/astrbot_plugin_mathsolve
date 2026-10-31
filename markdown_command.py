@@ -47,6 +47,6 @@ class MarkdownMixedMessageFilter(CustomFilter):
                     break
             else:
                 return True
-        if re.fullmatch(r'md(?:\s+[\s\S]*)?', restored) and restored != old:
+        if re.fullmatch(r'(?:md|批改)(?:\s+[\s\S]*)?', restored) and restored != old:
             event.message_str = restored
         return True

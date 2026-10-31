@@ -90,7 +90,7 @@ async def run_process(args, *, cwd=None, env=None, timeout=60):
 
 
 BACKGROUND_TASKS = ('_session_cleaner_task', '_cache_cleaner_task',
-    '_daily_report_task', '_usage_scheduler_task', '_playwright_install_task')
+    '_daily_report_task', '_usage_scheduler_task', '_playwright_install_task', '_grading_index_task')
 
 
 async def release_instance_resources(plugin):
