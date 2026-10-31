@@ -27,6 +27,7 @@ HELP = """个人数学作答本
 /批改 题目与作答（可带图、引用图片，或先发图再发命令）
 /批改 搜索 题号：查看该题题干、作答与红色批注图片
 /批改 修改 题号 修改要求：单独修改，题号不变
+/批改 删除 题号：删除该题及修改历史，其他题号不变、不复用
 /批改 导出：获取最新整本 PDF
 /批改 检索 关键词：查询自己的作答记录
 /批改 分析 [关注点]：依据题号分析薄弱项
@@ -44,10 +45,10 @@ def parse_command(text):
     # Also accept tabs/newlines between subcommand parameters.
     fields = arg.split(None, 1)
     verb, rest = (fields[0], fields[1] if len(fields) > 1 else "") if fields else ("", "")
-    actions = {"搜索": "get", "修改": "modify", "导出": "export", "检索": "search",
+    actions = {"搜索": "get", "修改": "modify", "删除": "delete", "导出": "export", "检索": "search",
                "分析": "analyze", "历史": "history", "帮助": "help"}
     action = actions.get(verb, "submit")
-    if action in {"get", "modify", "history"}:
+    if action in {"get", "modify", "history", "delete"}:
         pieces = rest.split(None, 1)
         if not pieces or not re.fullmatch(r"[1-9]\d{0,8}", pieces[0]):
             raise GradingError(f"用法：/批改 {verb} 正整数题号" + (" 修改要求" if action == "modify" else ""))
@@ -55,6 +56,8 @@ def parse_command(text):
         if action == "modify" and not content:
             raise GradingError("请说明要修改的内容，例如：/批改 修改 1 第二步漏写了 x>0，请补上并重新批改")
         if action != "modify" and content:
+            if action == "delete":
+                raise GradingError("用法：/批改 删除 正整数题号；一次只能删除一道题")
             raise GradingError(f"按题号查询请使用 /批改 {verb} 题号；按内容查询请使用 /批改 检索 关键词")
         return action, int(pieces[0]), content
     if action in {"export", "help"} and rest:
@@ -281,8 +284,7 @@ class GradingMixin:
                     prompt += "\n【本轮修改附带的引用内容】\n" + quoted_text
                 revision = old["revision"] + 1
             else:
-                rows = self._grading_store.rows(owner)
-                number = max((r["number"] for r in rows), default=0) + 1
+                number = self._grading_store.next_number(owner)
                 revision = 1
                 prompt, images = await self._grading_inputs(event, text)
             if len(prompt) > 60000:
@@ -307,7 +309,11 @@ class GradingMixin:
                         page.get_pixmap(matrix=fitz.Matrix(1.65, 1.65), alpha=False).save(output)
                         paths.append(output)
                 return paths
-            paths = await finish_io(render)
+            # Deletion may purge immutable entry files. Protect the read, while
+            # the temporary preview stays valid for the subsequent send.
+            async with self._grading_lock(self._grading_owner(event)):
+                self._grading_store.get(self._grading_owner(event), row["number"])
+                paths = await finish_io(render)
             for start in range(0, len(paths), 3):
                 chain = self._build_msg_chain_from_components([Comp.Image.fromFileSystem(str(p)) for p in paths[start:start+3]])
                 await event.send(chain)
@@ -362,6 +368,7 @@ class GradingMixin:
     async def _grading_index_owner(self, owner, provider, model_key, budget=24):
         lock = self._grading_index_locks.setdefault(owner, asyncio.Lock())
         async with lock:
+            version, _ = self._grading_store.version(owner)
             vectors = self._grading_store.vectors(owner, model_key)
             done = 0
             for chunk in self._grading_chunks(owner):
@@ -369,7 +376,8 @@ class GradingMixin:
                     continue
                 raw = await asyncio.wait_for(provider.get_embedding(chunk["text"]), timeout=45)
                 vector = self._grading_vector(raw)
-                self._grading_store.save_vector(owner, model_key, chunk["hash"], vector)
+                if not self._grading_store.save_vector(owner, model_key, chunk["hash"], vector, version):
+                    break  # A concurrent delete/modify invalidated this snapshot.
                 vectors[chunk["hash"]] = vector
                 done += 1
                 if done >= budget:
@@ -406,13 +414,18 @@ class GradingMixin:
                 await self._grading_index_owner(owner, provider, key, budget=4)
                 query_vector = self._grading_vector(await asyncio.wait_for(provider.get_embedding(query), timeout=45))
                 vectors = self._grading_store.vectors(owner, key)
-                ready = sum(c["hash"] in vectors for c in chunks)
-                mode = f"语义+关键词检索（已索引 {ready}/{len(chunks)} 段）"
             else:
                 note = "未配置嵌入模型，当前使用关键词检索。"
         except Exception as exc:
             logger.warning("[mathsolve grading] 检索降级: %s", type(exc).__name__)
             note = "嵌入服务暂不可用，当前使用关键词检索，已保存的批改不受影响。"
+        # An embedding request can outlive a deletion. Rank only current records.
+        chunks = self._grading_chunks(owner)
+        if not chunks:
+            raise GradingError("你的作答本还是空的")
+        if query_vector:
+            ready = sum(c["hash"] in vectors for c in chunks)
+            mode = f"语义+关键词检索（已索引 {ready}/{len(chunks)} 段）"
         tokens = re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]{1,2}", query.lower())
         ranked = []
         for chunk in chunks:
@@ -496,6 +509,13 @@ class GradingMixin:
                     "pages": count, "message": f"已发送第 {number} 题的题干、作答与批注图片（第 {row['revision']} 版）。"}
         if action == "export":
             return await self._grading_export(event)
+        if action == "delete":
+            async with self._grading_lock(owner):
+                result = await finish_io(self._grading_store.delete, owner, number)
+            prefix = "此前已删除" if result["duplicate"] else "已删除"
+            return {"ok": True, "deleted": True, "number": number, **result,
+                    "message": f"{prefix}第 {number} 题及其修改历史，作答本和检索记录已更新。"
+                               + ("其他题号不变，删除的题号不会复用。" if result["remaining"] else "当前作答本已空，后续提交继续使用新题号。")}
         if action == "history":
             history = self._grading_store.history(owner, number)
             lines = [f"第 {number} 题的修改历史（首次提交始终保留）："]

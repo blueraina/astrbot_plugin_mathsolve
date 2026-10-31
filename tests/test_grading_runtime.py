@@ -78,6 +78,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_tool_has_no_other_user_identity_parameter(self):
         tool=next(t for t in self.plugin.context.tools if t.name=='mathsolve_grading')
         self.assertEqual(set(tool.parameters['properties']),{'action','number','text'})
+    async def test_delete_tool_requires_number_and_deletes_only_callers_record(self):
+        event=Event(text='删除我的第1题')
+        owner=self.plugin._grading_owner(event)
+        other=self.plugin._grading_owner(Event(user='bob'))
+        store=self.plugin._grading_store
+        for user in [owner,other]:store.publish(user,1,1,fixture(),pdf_bytes())
+        wrapper=types.SimpleNamespace(context=types.SimpleNamespace(event=event,context=self.plugin.context))
+        tool=plugin_main.MathsolveGradingTool()
+        self.assertIn('delete',tool.parameters['properties']['action']['enum'])
+        for number in [None,True,0,'1']:
+            result=json.loads(await tool.call(wrapper,action='delete',number=number))
+            self.assertFalse(result['ok'])
+        result=json.loads(await tool.call(wrapper,action='delete',number=1))
+        self.assertTrue(result['deleted'])
+        self.assertFalse(store.rows(owner))
+        self.assertEqual(len(store.rows(other)),1)
     async def test_mixed_image_command_boundary(self):
         event=Event(text='批改检查我的解答')
         event.is_at_or_wake_command=True

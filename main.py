@@ -405,17 +405,18 @@ class Md2ImgSolveMathMdTool(FunctionTool[AstrAgentContext]):
 class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
     name: str = "mathsolve_grading"
     description: str = (
-        "用户明确要求批改、记录作答、查看/修改自己的题目、导出作答本、检索或分析薄弱项时使用。"
+        "用户明确要求批改、记录作答、查看/修改/删除自己的题目、导出作答本、检索或分析薄弱项时使用。"
         "每个用户跨群共用独立作答本，一次提交一个编号。submit 忠实读取本轮原始文字/图片/引用，"
         "生成逐步红字批注并保存；禁止把你生成的解答当用户作答。get 按题号发送题干作答批注图片；"
-        "modify 只改指定题号并保留历史；export 发送最新整本PDF；search 检索本人记录；"
+        "modify 只改指定题号并保留历史；delete 删除指定题目及历史，仅在用户明确要求删除且指定题号时使用；"
+        "export 发送最新整本PDF；search 检索本人记录；"
         "analyze 分析有题号证据的薄弱项；history 查看版本记录。禁止猜测别人的身份或题号。"
     )
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["submit", "get", "modify", "export", "search", "analyze", "history"]},
-            "number": {"type": "integer", "minimum": 1, "description": "get/modify/history 必填，用户本人的题号"},
+            "action": {"type": "string", "enum": ["submit", "get", "modify", "delete", "export", "search", "analyze", "history"]},
+            "number": {"type": "integer", "minimum": 1, "description": "get/modify/delete/history 必填，用户本人的题号"},
             "text": {"type": "string", "description": "modify 的用户修改要求、search 的关键词或 analyze 的关注点；submit 不需填，程序直接读取原始消息"},
         },
         "required": ["action"],
@@ -427,7 +428,7 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
         try:
             action = str(kwargs.get("action") or "")
             number = kwargs.get("number")
-            if action in {"get", "modify", "history"} and (isinstance(number, bool) or not isinstance(number, int) or number < 1):
+            if action in {"get", "modify", "delete", "history"} and (isinstance(number, bool) or not isinstance(number, int) or number < 1):
                 raise GradingError("请指定有效的正整数题号")
             text = str(kwargs.get("text") or "").strip()
             if action in {"modify", "search"} and not text:
@@ -451,7 +452,7 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.5",
+    "1.18.6",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -559,7 +560,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.5 - 批改转发输入完整性修复)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.6 - 批改单题删除)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 

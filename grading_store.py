@@ -43,7 +43,15 @@ class GradingStore:
             CREATE TABLE IF NOT EXISTS vectors(owner TEXT NOT NULL, model_key TEXT NOT NULL,
               content_hash TEXT NOT NULL, vector_json TEXT NOT NULL,
               PRIMARY KEY(owner,model_key,content_hash));
+            CREATE TABLE IF NOT EXISTS sequences(owner TEXT PRIMARY KEY, last_number INTEGER NOT NULL);
+            INSERT OR IGNORE INTO sequences
+              SELECT owner,MAX(number) FROM (SELECT owner,number FROM records
+                UNION ALL SELECT owner,number FROM requests) GROUP BY owner;
+            CREATE TABLE IF NOT EXISTS deleted_entries(owner TEXT NOT NULL, number INTEGER NOT NULL,
+              deleted TEXT NOT NULL, PRIMARY KEY(owner,number));
+            CREATE TABLE IF NOT EXISTS artifact_cleanup(owner TEXT NOT NULL, path TEXT PRIMARY KEY);
             """)
+        self.cleanup_deleted()
 
     @contextmanager
     def connect(self):
@@ -106,14 +114,48 @@ class GradingStore:
             raise GradingError("作答本文件路径无效")
         return path
 
+    def next_number(self, owner):
+        self._user(owner)
+        with self.connect() as db:
+            row = db.execute("SELECT last_number FROM sequences WHERE owner=?", (owner,)).fetchone()
+        return row[0] + 1 if row else 1
+
+    def _build_book(self, rows, book):
+        import fitz
+        bodies, toc = [], []
+        with fitz.open() as merged:
+            for row in rows:
+                bodies.append(entry_body(row["number"], row["revision"], row["record"]))
+                toc.append([1, f"第{row['number']}题：{row['record']['title']}", len(merged) + 1])
+                with fitz.open(self.artifact(row["artifact_dir"]) / "answer.pdf") as source:
+                    if not len(source):
+                        raise GradingError("生成了空白 PDF，未保存本次修改")
+                    merged.insert_pdf(source)
+            for i, page in enumerate(merged):
+                box = fitz.Rect(0, page.rect.height - 35, page.rect.width, page.rect.height)
+                page.draw_rect(box, color=None, fill=(1, 1, 1), overlay=True)
+                page.insert_textbox(box, str(i + 1), fontsize=9, align=1, color=(0.4, 0.4, 0.4))
+            merged.set_toc(toc)
+            merged.set_metadata({"title": "个人数学作答本", "author": "AstrBot mathsolve"})
+            merged.save(book / "book.pdf", garbage=4, deflate=True)
+        (book / "book.tex").write_text(document("\n\\newpage\n".join(bodies)), encoding="utf-8")
+
+    @staticmethod
+    def _sync(paths):
+        for path in paths:
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
     def publish(self, owner, number, revision, record, pdf_bytes, request_key="", instruction=""):
         """Prepare all artifacts first. SQLite is the single atomic visibility point."""
-        import fitz
-        rows = self.rows(owner)
         version, _ = self.version(owner)
+        rows = self.rows(owner)
         old = next((r for r in rows if r["number"] == number), None)
         expected = old["revision"] + 1 if old else 1
-        next_number = max((r["number"] for r in rows), default=0) + 1
+        next_number = self.next_number(owner)
         if revision != expected or (old is None and number != next_number):
             raise GradingError("作答本已发生变化，请重新执行")
         identifier = uuid.uuid4().hex
@@ -128,24 +170,7 @@ class GradingStore:
             relative = str(entry.relative_to(self.root))
             candidate = {"number": number, "revision": revision, "record": record, "artifact_dir": relative}
             combined = sorted([r for r in rows if r["number"] != number] + [candidate], key=lambda r: r["number"])
-            bodies, toc = [], []
-            with fitz.open() as merged:
-                for row in combined:
-                    bodies.append(entry_body(row["number"], row["revision"], row["record"]))
-                    toc.append([1, f"第{row['number']}题：{row['record']['title']}", len(merged) + 1])
-                    with fitz.open(self.artifact(row["artifact_dir"]) / "answer.pdf") as source:
-                        if not len(source):
-                            raise GradingError("生成了空白 PDF，未保存本次修改")
-                        merged.insert_pdf(source)
-                for i, page in enumerate(merged):
-                    # Consistent global pagination after joining independent questions.
-                    box = fitz.Rect(0, page.rect.height - 35, page.rect.width, page.rect.height)
-                    page.draw_rect(box, color=None, fill=(1, 1, 1), overlay=True)
-                    page.insert_textbox(box, str(i + 1), fontsize=9, align=1, color=(0.4, 0.4, 0.4))
-                merged.set_toc(toc)
-                merged.set_metadata({"title": "个人数学作答本", "author": "AstrBot mathsolve"})
-                merged.save(book / "book.pdf", garbage=4, deflate=True)
-            (book / "book.tex").write_text(document("\n\\newpage\n".join(bodies)), encoding="utf-8")
+            self._build_book(combined, book)
             # Flush artifacts before committing the DB pointers (crash consistency).
             for path in [entry / "answer.tex", entry / "answer.pdf", book / "book.pdf", book / "book.tex"]:
                 with path.open("rb") as file:
@@ -175,6 +200,8 @@ class GradingStore:
                 if request_key:
                     db.execute("INSERT INTO requests VALUES(?,?,?,?)", (owner, request_key, number, revision))
                 db.execute("UPDATE owners SET version=?,book_dir=? WHERE owner=?", (version+1, book_relative, owner))
+                db.execute("""INSERT INTO sequences VALUES(?,?) ON CONFLICT(owner)
+                    DO UPDATE SET last_number=MAX(last_number,excluded.last_number)""", (owner, number))
             committed = True
             try:
                 self._prune_books(owner, book)
@@ -185,6 +212,69 @@ class GradingStore:
             if not committed:
                 shutil.rmtree(entry, ignore_errors=True)
                 shutil.rmtree(book, ignore_errors=True)
+
+    def delete(self, owner, number):
+        """Remove one account's record; publish the rebuilt book before purging files."""
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise GradingError("请指定有效的正整数题号")
+        version, _ = self.version(owner)
+        rows = self.rows(owner)
+        if not any(row["number"] == number for row in rows):
+            with self.connect() as db:
+                deleted = db.execute("SELECT 1 FROM deleted_entries WHERE owner=? AND number=?", (owner, number)).fetchone()
+            if deleted:
+                self.cleanup_deleted(owner)
+                return {"duplicate": True, "remaining": len(rows)}
+            raise GradingError(f"你的作答本中没有第 {number} 题")
+        remaining = [row for row in rows if row["number"] != number]
+        user = self._user(owner)
+        book = user / "books" / f"v{version+1}-{uuid.uuid4().hex}"
+        obsolete = [user / "entries" / f"{number:06d}", *(user / "books").iterdir()]
+        committed = False
+        try:
+            if remaining:
+                book.mkdir(parents=True, mode=0o700)
+                self._build_book(remaining, book)
+                self._sync([book / "book.pdf", book / "book.tex", book, book.parent, user])
+            relative = str(book.relative_to(self.root)) if remaining else ""
+            with self.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                actual = db.execute("SELECT version FROM owners WHERE owner=?", (owner,)).fetchone()[0]
+                if actual != version:
+                    raise GradingError("作答本正在更新，请重试；原记录未改变")
+                db.execute("DELETE FROM records WHERE owner=? AND number=?", (owner, number))
+                db.execute("DELETE FROM revisions WHERE owner=? AND number=?", (owner, number))
+                # Invalidate all generations of this owner's cache. Remaining records
+                # are re-indexed; stale chunks from old templates cannot survive.
+                db.execute("DELETE FROM vectors WHERE owner=?", (owner,))
+                db.execute("UPDATE owners SET version=?,book_dir=? WHERE owner=?", (version+1, relative, owner))
+                db.execute("INSERT INTO deleted_entries VALUES(?,?,?)", (owner, number, datetime.now(timezone.utc).isoformat()))
+                db.executemany("INSERT OR IGNORE INTO artifact_cleanup VALUES(?,?)",
+                               [(owner, str(path.relative_to(self.root))) for path in obsolete])
+                # Keep content-free request receipts to prevent a replayed submission
+                # from recreating a deleted record. Never recycle its number.
+            committed = True
+            self.cleanup_deleted(owner)
+            return {"duplicate": False, "remaining": len(remaining)}
+        finally:
+            if not committed:
+                shutil.rmtree(book, ignore_errors=True)
+
+    def cleanup_deleted(self, owner=None):
+        with self.connect() as db:
+            pending = db.execute("SELECT owner,path FROM artifact_cleanup" + (" WHERE owner=?" if owner else ""),
+                                 (owner,) if owner else ()).fetchall()
+        for account, relative in pending:
+            path = self.artifact(relative)
+            if not path.is_relative_to(self._user(account).resolve()) or path == self._user(account).resolve():
+                raise GradingError("待清理的作答本文件路径无效")
+            try:
+                if path.exists():
+                    shutil.rmtree(path)
+            except OSError:
+                continue  # Durable queue retries after a reload or repeated delete.
+            with self.connect() as db:
+                db.execute("DELETE FROM artifact_cleanup WHERE path=?", (relative,))
 
     def _prune_books(self, owner, current):
         # Keep all entry revisions, but not quadratic copies of old full books.
@@ -215,6 +305,12 @@ class GradingStore:
         with self.connect() as db:
             return {r[0]: json.loads(r[1]) for r in db.execute("SELECT content_hash,vector_json FROM vectors WHERE owner=? AND model_key=?", (owner, model_key))}
 
-    def save_vector(self, owner, model_key, content_hash, vector):
+    def save_vector(self, owner, model_key, content_hash, vector, expected_version=None):
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if expected_version is not None:
+                row = db.execute("SELECT version FROM owners WHERE owner=?", (owner,)).fetchone()
+                if row is None or row[0] != expected_version:
+                    return False
             db.execute("INSERT OR REPLACE INTO vectors VALUES(?,?,?,?)", (owner, model_key, content_hash, json.dumps(vector)))
+        return True
