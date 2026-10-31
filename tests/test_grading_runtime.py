@@ -15,6 +15,8 @@ import astrbot.api.message_components as Comp
 from markdown_command import MarkdownMixedMessageFilter
 from test_grading import Event, fixture, pdf_bytes
 from grading_document import GradingError
+from astrbot.core.provider.entities import LLMResponse
+from astrbot.core.message.message_event_result import MessageEventResult
 
 
 class Context:
@@ -78,6 +80,59 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_tool_has_no_other_user_identity_parameter(self):
         tool=next(t for t in self.plugin.context.tools if t.name=='mathsolve_grading')
         self.assertEqual(set(tool.parameters['properties']),{'action','number','text'})
+    async def test_failed_grading_tool_cannot_be_replaced_by_invented_report(self):
+        event=Event(text='批改一下')
+        self.plugin._grading_run=AsyncMock(side_effect=GradingError('PDF 排版失败，本次未保存、未占编号'))
+        wrapper=types.SimpleNamespace(context=types.SimpleNamespace(event=event,context=self.plugin.context))
+        outcome=json.loads(await plugin_main.MathsolveGradingTool().call(wrapper,action='submit'))
+        self.assertFalse(outcome['ok'])
+        response=LLMResponse(role='assistant',completion_text='全卷总分128/150，已保存')
+        await self.plugin.on_llm_resp(event,response)
+        self.assertIn('本次未保存',response.completion_text)
+        self.assertNotIn('128',response.completion_text)
+        # A later decorator may wrap the hallucinated report in a forward node.
+        result=MessageEventResult(chain=[Comp.Node(uin='1',name='test',content=[Comp.Plain('总分128/150')])])
+        event.get_result=lambda:result
+        await self.plugin.on_decorating_result(event)
+        self.assertEqual(len(result.chain),1)
+        self.assertIsInstance(result.chain[0],Comp.Plain)
+        self.assertEqual(result.get_plain_text(),response.completion_text)
+    async def test_grading_retry_success_replaces_failure_and_final_score(self):
+        event=Event(text='批改一下')
+        wrapper=types.SimpleNamespace(context=types.SimpleNamespace(event=event,context=self.plugin.context))
+        self.plugin._grading_run=AsyncMock(side_effect=GradingError('暂时失败'))
+        tool=plugin_main.MathsolveGradingTool()
+        await tool.call(wrapper,action='submit')
+        retry=LLMResponse(role='assistant',tools_call_name=['mathsolve_grading'],tools_call_args=[{'action':'submit'}],tools_call_ids=['retry'])
+        await self.plugin.on_llm_resp(event,retry)
+        self.assertEqual(retry.tools_call_name,['mathsolve_grading'])
+        self.plugin._grading_run=AsyncMock(return_value={'ok':True,'saved':True,'message':'第 3 题已保存'})
+        await tool.call(wrapper,action='submit')
+        response=LLMResponse(role='assistant',completion_text='满分150，你得128分')
+        await self.plugin.on_llm_resp(event,response)
+        self.assertEqual(response.completion_text,'第 3 题已保存')
+    async def test_tool_error_guard_is_per_event_and_does_not_change_internal_generation(self):
+        first=Event(text='删除第99题')
+        first.set_extra('mathsolve_grading_tool_result',{'ok':False,'error':'没有第99题'})
+        response=LLMResponse(role='assistant',completion_text='已经删除')
+        await self.plugin.on_llm_resp(first,response)
+        self.assertIn('没有第99题',response.completion_text)
+        first.set_extra('mathsolve_grading_generation',True)
+        internal=LLMResponse(role='assistant',completion_text='{"complete":true}')
+        await self.plugin.on_llm_resp(first,internal)
+        self.assertEqual(internal.completion_text,'{"complete":true}')
+        other=Event(text='批改工具怎么使用')
+        response=LLMResponse(role='assistant',completion_text='请使用 /批改')
+        await self.plugin.on_llm_resp(other,response)
+        self.assertEqual(response.completion_text,'请使用 /批改')
+    async def test_grading_tool_timeout_is_reported_without_fabricated_success(self):
+        event=Event(text='批改一下')
+        self.plugin._grading_run=AsyncMock(side_effect=asyncio.TimeoutError)
+        wrapper=types.SimpleNamespace(context=types.SimpleNamespace(event=event,context=self.plugin.context))
+        await plugin_main.MathsolveGradingTool().call(wrapper,action='submit')
+        response=LLMResponse(role='assistant',completion_text='已保存')
+        await self.plugin.on_llm_resp(event,response)
+        self.assertIn('超时',response.completion_text)
     async def test_delete_tool_requires_number_and_deletes_only_callers_record(self):
         event=Event(text='删除我的第1题')
         owner=self.plugin._grading_owner(event)

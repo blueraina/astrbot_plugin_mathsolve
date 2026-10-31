@@ -80,6 +80,20 @@ def grading_intent(event):
     return bool(re.search(r"批改|批阅|改作业|作答本|错题本|薄弱项|薄弱点", text))
 
 
+def grading_tool_reply(event):
+    """Ground the final acknowledgement in this turn's actual tool result."""
+    result = event.get_extra("mathsolve_grading_tool_result")
+    if not isinstance(result, dict):
+        return None
+    if result.get("ok") is False:
+        return "个人作答本操作未完成：" + str(result.get("error") or "请重试")
+    if result.get("ok") is True:
+        # Search results still need the chat agent's interpretation; analysis
+        # and document operations already have authoritative user-facing text.
+        return result.get("analysis") or result.get("message") or None
+    return None
+
+
 async def finish_io(function, *args):
     """A cancelled caller must wait for a publishing/thread IO critical section."""
     task = asyncio.create_task(asyncio.to_thread(function, *args))

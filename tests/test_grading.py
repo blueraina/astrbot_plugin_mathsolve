@@ -109,6 +109,24 @@ class DocumentTests(unittest.TestCase):
         data = fixture()
         data['reference_tex'] = r'证明完毕。$\square$ 或 $\blacksquare$'
         self.assertEqual(validate_record(data)['reference_tex'], data['reference_tex'])
+    def test_large_algebra_operators_and_literal_hash_are_preserved(self):
+        data = fixture()
+        data['reference_tex'] = r'题#1，已转义\#2，换行\\#3；$\bigoplus_{i=1}^n V_i$ 与 $\bigotimes_i W_i$。'
+        result = validate_record(data)['reference_tex']
+        self.assertEqual(result, r'题\#1，已转义\#2，换行\\\#3；$\bigoplus_{i=1}^n V_i$ 与 $\bigotimes_i W_i$。')
+        data['reference_tex'] = r'#\input{/etc/passwd}'
+        with self.assertRaises(GradingError): validate_record(data)
+    def test_only_complete_bare_math_environments_are_wrapped(self):
+        from grading_document import tex_fragment
+        bare = r'\begin{aligned} A&=\begin{pmatrix}1&0\\0&1\end{pmatrix}\\B&=0\end{aligned}'
+        self.assertEqual(tex_fragment('证明：'+bare+'。'), '证明：'+r'\['+bare+r'\]'+'。')
+        for wrapped in [r'\['+bare+r'\]', '$'+bare+'$', '$$'+bare+'$$', r'\('+bare+r'\)',
+                        r'\begin{equation}'+bare+r'\end{equation}']:
+            self.assertEqual(tex_fragment(wrapped),wrapped)
+        multiple = bare+'文字'+r'\begin{cases}x&x>0\\-x&x<0\end{cases}'
+        self.assertEqual(tex_fragment(multiple).count(r'\['),2)
+        malformed = r'\begin{aligned}x&=1'
+        self.assertEqual(tex_fragment(malformed),malformed)
     def test_missing_question_is_rejected_but_unattempted_answer_is_valid(self):
         with self.assertRaises(GradingError):validate_record({'complete':False,'input_available':False})
         data=fixture();data['problem_tex']='[未提供题目]'

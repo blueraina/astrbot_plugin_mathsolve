@@ -21,7 +21,7 @@ try:
     from .markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
     from .markdown_command import MarkdownMixedMessageFilter
     from .pdf_theme_commands import PdfThemeMixin
-    from .grading import GradingMixin, GradingError, grading_intent
+    from .grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from .group_message_gate import GroupMessageGate, group_key
     from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence
 except ImportError:
@@ -38,7 +38,7 @@ except ImportError:
     from markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
     from markdown_command import MarkdownMixedMessageFilter
     from pdf_theme_commands import PdfThemeMixin
-    from grading import GradingMixin, GradingError, grading_intent
+    from grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from group_message_gate import GroupMessageGate, group_key
     from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence
 
@@ -411,6 +411,7 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
         "modify 只改指定题号并保留历史；delete 删除指定题目及历史，仅在用户明确要求删除且指定题号时使用；"
         "export 发送最新整本PDF；search 检索本人记录；"
         "analyze 分析有题号证据的薄弱项；history 查看版本记录。禁止猜测别人的身份或题号。"
+        "返回 ok=false 时必须告知用户失败原因，不得自行补写批改报告、分数或声称已保存。"
     )
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
@@ -436,14 +437,15 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
             if action == "submit":
                 text = str(getattr(event, "message_str", "") or "").strip()
             result = await plugin._grading_run(event, action, number, text)
-            return json.dumps(result, ensure_ascii=False)
         except GradingError as exc:
-            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+            result = {"ok": False, "error": str(exc)}
         except asyncio.TimeoutError:
-            return json.dumps({"ok": False, "error": "批改模型超时，未完成的修改不会覆盖旧记录"}, ensure_ascii=False)
+            result = {"ok": False, "error": "批改模型超时，未完成的修改不会覆盖旧记录"}
         except Exception as exc:
             logger.error("[mathsolve grading] Agent 工具调用失败: %s", type(exc).__name__, exc_info=True)
-            return json.dumps({"ok": False, "error": "操作未完成，可按题号查询已保存的记录或导出作答本"}, ensure_ascii=False)
+            result = {"ok": False, "error": "操作未完成，可按题号查询已保存的记录或导出作答本"}
+        event.set_extra("mathsolve_grading_tool_result", result)
+        return json.dumps(result, ensure_ascii=False)
 
 
 # 插件定义
@@ -452,7 +454,7 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.6",
+    "1.18.7",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -560,7 +562,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.6 - 批改单题删除)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.7 - 批改排版与工具结果反馈修复)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
@@ -2190,6 +2192,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
                 "\n用户正在请求个人作答批改/查询/修改/分析。优先使用 mathsolve_grading 工具。"
                 "submit 由工具读取用户原始消息与图片，不要用你生成的解答替换原作答。"
                 "工具已发送图片/PDF时仅简短确认，不再调用通用图片或PDF解题工具。"
+                "工具返回 ok=false 时如实转告失败原因，不得自行批阅、评分或声称已保存；用户未要求评分时禁止打分。"
                 "分析薄弱项必须先调用本人工具取得带题号的依据，不得凭印象编造。"
             )
             return
@@ -2519,6 +2522,13 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
         if event.get_extra("mathsolve_grading_generation") or event.get_extra("mathsolve_grading_command"):
             return
+        tool_reply = grading_tool_reply(event)
+        if tool_reply is not None and not getattr(resp, "tools_call_name", None):
+            # Replace the whole chain: plain-text assignment alone leaves
+            # forwarded nodes/images containing the invented report intact.
+            resp.result_chain = None
+            resp.completion_text = tool_reply
+            return
         if grading_intent(event):
             resp.completion_text = plain_reply_text(resp.completion_text or "")
             return
@@ -2638,6 +2648,13 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
     # ---------------- 装饰结果：hint 逐条消息；否则 Markdown->图片 ----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
+        if not event.get_extra("mathsolve_grading_generation") and not event.get_extra("mathsolve_grading_command"):
+            tool_reply = grading_tool_reply(event)
+            if tool_reply is not None:
+                result = event.get_result()
+                if result is not None:
+                    result.chain = [Plain(tool_reply)]
+                return
         if event.get_extra("mathsolve_grading_command") or grading_intent(event):
             return
         if event.get_extra("md2img_pdf_theme_command"):
