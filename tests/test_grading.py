@@ -109,6 +109,12 @@ class DocumentTests(unittest.TestCase):
         data = fixture()
         data['reference_tex'] = r'证明完毕。$\square$ 或 $\blacksquare$'
         self.assertEqual(validate_record(data)['reference_tex'], data['reference_tex'])
+    def test_missing_question_is_rejected_but_unattempted_answer_is_valid(self):
+        with self.assertRaises(GradingError):validate_record({'complete':False,'input_available':False})
+        data=fixture();data['problem_tex']='[未提供题目]'
+        with self.assertRaises(GradingError):validate_record(data)
+        data=fixture();data['steps']=[{'work_tex':'未作答','comments':[{'kind':'unattempted','tex':'未提交作答，不计为答错','tags':[]}]}]
+        self.assertEqual(validate_record(data)['steps'][0]['comments'][0]['kind'],'unattempted')
     def test_command_boundaries(self):
         self.assertEqual(parse_command("/批改 修改\t12\n修正第二步"), ("modify", 12, "修正第二步"))
         self.assertEqual(parse_command("批改 题1及题2"), ("submit", None, "题1及题2"))

@@ -13,9 +13,13 @@ import tempfile
 try:
     from .grading_document import GRADING_RULES, GradingError, parse_record, document, entry_body, record_chunks
     from .grading_store import GradingStore, owner_key
+    from .grading_inputs import read_references, has_submission_text, field
+    from .qq_image_recovery import PdfImageInputError
 except ImportError:
     from grading_document import GRADING_RULES, GradingError, parse_record, document, entry_body, record_chunks
     from grading_store import GradingStore, owner_key
+    from grading_inputs import read_references, has_submission_text, field
+    from qq_image_recovery import PdfImageInputError
 
 logger = logging.getLogger("astrbot")
 
@@ -117,28 +121,24 @@ class GradingMixin:
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
     async def _grading_quoted_parts(self, event, proxy):
-        texts, images = [], []
-        async def visit(parts, depth=0):
-            if depth > 4:
-                raise GradingError("引用嵌套过深，请直接发送题目与作答")
-            for part in parts or []:
-                kind = type(part).__name__.lower()
-                if kind == "plain":
-                    texts.append(str(getattr(part, "text", "") or ""))
-                elif kind == "image":
-                    # Reuse the component fallback rules without mixing it with
-                    # unrelated current/pending image messages.
-                    quoted_event = copy.copy(event)
-                    quoted_event.message_obj = copy.copy(event.message_obj)
-                    quoted_event.message_obj.message = [part]
-                    setattr(quoted_event, "_mathsolve_pdf_image_inputs", None)
-                    images.extend(await proxy._pdf_get_event_image_inputs(quoted_event))
-                elif kind == "reply":
-                    await visit(getattr(part, "chain", None), depth + 1)
-        for part in getattr(getattr(event, "message_obj", None), "message", []) or []:
-            if type(part).__name__.lower() == "reply":
-                await visit(getattr(part, "chain", None))
-        return "\n".join(texts).strip(), images
+        text, parts, referenced = await read_references(event)
+        images = []
+        for part in parts:
+            if isinstance(part, dict):
+                import astrbot.api.message_components as Comp
+                data = field(part, 'data', part)
+                part = Comp.Image(file=field(data, 'file', '') or '', url=field(data, 'url', '') or '')
+            quoted_event = copy.copy(event)
+            quoted_event.message_obj = copy.copy(event.message_obj)
+            quoted_event.message_obj.message = [part]
+            setattr(quoted_event, "_mathsolve_pdf_image_inputs", None)
+            try:
+                images.extend(await proxy._pdf_get_event_image_inputs(quoted_event))
+            except PdfImageInputError as exc:
+                raise GradingError('引用或转发中的图片读取失败，请重新转发或直接上传原图；本次未保存、未占编号') from exc
+        if referenced:
+            logger.info('[mathsolve grading] 引用输入已展开: text_chars=%d images=%d', len(text), len(images))
+        return text, list(dict.fromkeys(images))
 
     async def _grading_inputs(self, event, text):
         # Reuse /pdf's QQ recovery, multi-image and pending/reply resolution.
@@ -153,7 +153,11 @@ class GradingMixin:
             if quoted_text:
                 text += "\n【引用的原消息】\n" + quoted_text
             inputs = list(dict.fromkeys(inputs + quoted_images))
-            resolved = await proxy._pdf_resolve_inputs(event, text, inputs, cmd_label="批改")
+            if quoted_text or quoted_images:
+                # Explicit reference material wins over stale pending/history input.
+                resolved = {'text': text, 'images': inputs}
+            else:
+                resolved = await proxy._pdf_resolve_inputs(event, text, inputs, cmd_label="批改")
             if resolved.get("error"):
                 raise GradingError(resolved["error"])
             images = await proxy._pdf_snapshot_image_urls(resolved.get("images", []), event=event)
@@ -163,6 +167,8 @@ class GradingMixin:
             prompt = resolved.get("text", "")
             if context:
                 prompt += "\n【引用的既有 PDF 内容，仅作背景，不代表用户原作答】\n" + str(context)
+            if not images and not has_submission_text(prompt):
+                raise GradingError('没有读取到题目或作答，请附上文字、原图或引用可读取的转发记录；本次未保存、未占编号')
             return prompt, images
 
     async def _grading_provider(self, event):

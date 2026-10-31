@@ -78,6 +78,8 @@ def plain(value, limit=200):
 
 
 def validate_record(data, allow_score=False):
+    if isinstance(data, dict) and data.get('input_available') is False:
+        raise GradingError('没有读取到可批改的题目，请重新提供题目与作答')
     if not isinstance(data, dict) or data.get("complete") is not True:
         raise GradingError("批改结果不完整")
     result = {"complete": True, "title": plain(data.get("title", "作答批改")),
@@ -87,6 +89,9 @@ def validate_record(data, allow_score=False):
               "steps": [], "knowledge_points": [], "score": None}
     if not result["problem_tex"] or not result["summary_tex"]:
         raise GradingError("题干或总结为空")
+    compact_problem = re.sub(r'[\s\[\]【】（）()：:。.!！]', '', result['problem_tex'])
+    if compact_problem in {'未提供题目', '未提交题目', '暂无题目', '无题目', '未提供题干', '没有提供题目', '题目未提供'}:
+        raise GradingError('题干只有缺失占位符，无法保存为作答记录')
     steps = data.get("steps")
     if not isinstance(steps, list) or not 1 <= len(steps) <= 200:
         raise GradingError("作答步骤缺失或过多")
@@ -214,6 +219,8 @@ def record_chunks(number, revision, original, current, chunk_size=1800):
 
 
 GRADING_RULES = r"""你是一名严格但审慎的数学批改教师。把用户提交的全部题干、原作答忠实转为 LaTeX。
+先确认确实读到了题目。若输入只有“批改一下”、转发占位符或无法读取题目，只返回 {"complete":false,"input_available":false}。
+不得生成“未提供题目”的空白批改记录。有明确题目但用户未作答时，仍可正常记录未作答。
 一次提交始终只有一个编号，即使包含多道题也不要拆记录。不得悄悄修正、删减或补全用户作答。
 按原作答顺序拆分 steps，在对应步骤的 comments 中指出错误、不严谨、条件缺失并解释原因。
 排版为左栏原作答、右栏红字批注。一个 step 是一个自然推导段，不把所有原文塞进一个巨长步骤。

@@ -451,7 +451,7 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.4",
+    "1.18.5",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -559,7 +559,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.4 - 批改输出格式兼容修复)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.5 - 批改转发输入完整性修复)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
