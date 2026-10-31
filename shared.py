@@ -2047,7 +2047,7 @@ def _normalize_multi_pdf_items(
     return norm
 
 
-def _pdf_raw_to_latex_parts(raw: str, problem_text: str, has_image: bool) -> Dict[str, Any]:
+def _pdf_raw_to_latex_parts(raw: str, problem_text: str, has_image: bool, preserve_empty_theorems: bool = False) -> Dict[str, Any]:
     """把模型原始输出解析、兜底并组装成可尝试编译的 PDF LaTeX。"""
     raw = _strip_all_code_fences(raw or "")
 
@@ -2101,7 +2101,8 @@ def _pdf_raw_to_latex_parts(raw: str, problem_text: str, has_image: bool) -> Dic
             if not solution_tex and len(raw) > 10:
                 solution_tex = _llm_raw_to_safe_tex(raw)
 
-    if not theorems_tex:
+    explicit_empty_theorems = preserve_empty_theorems and bool(re.search(r"<theorems>\s*</theorems>", raw, flags=re.I))
+    if not theorems_tex and not explicit_empty_theorems:
         theorems_tex = (
             r"\begin{theoremBox}{常用结论}" + "\n"
             r"本题仅用到基础运算与常用恒等变形" + "\n"
@@ -2114,10 +2115,11 @@ def _pdf_raw_to_latex_parts(raw: str, problem_text: str, has_image: bool) -> Dic
     theorems_tex = _sanitize_latex_fragment_for_xelatex(theorems_tex)
     solution_tex = _sanitize_latex_fragment_for_xelatex(solution_tex)
 
-    tex_src = _build_pdf_latex_document_multi(norm_items) if is_multi else _build_pdf_latex_document(
+    tex_src = _build_pdf_latex_document_multi(norm_items, omit_empty_theorems=explicit_empty_theorems) if is_multi else _build_pdf_latex_document(
         problem_tex,
         theorems_tex,
         solution_tex,
+        omit_empty_theorems=explicit_empty_theorems,
     )
     return {
         "raw": raw,
@@ -2130,7 +2132,7 @@ def _pdf_raw_to_latex_parts(raw: str, problem_text: str, has_image: bool) -> Dic
     }
 
 
-def _build_pdf_latex_document(problem_tex: str, theorems_tex: str, solution_tex: str) -> str:
+def _build_pdf_latex_document(problem_tex: str, theorems_tex: str, solution_tex: str, omit_empty_theorems: bool = False) -> str:
     """组装可 xelatex 编译的完整 LaTeX 文档（ctex + tcolorbox）。
 
     布局约定：
@@ -2165,8 +2167,7 @@ def _build_pdf_latex_document(problem_tex: str, theorems_tex: str, solution_tex:
         *box_preamble(),
 
         r"\begin{document}",
-        r"\section*{解题所需结论}",
-        theorems_tex,
+        *([r"\section*{解题所需结论}", theorems_tex] if theorems_tex or not omit_empty_theorems else []),
         "",
         r"\section*{解答}",
         r"\begin{problemBox}",
@@ -2180,7 +2181,7 @@ def _build_pdf_latex_document(problem_tex: str, theorems_tex: str, solution_tex:
     return "\n".join(parts)
 
 
-def _build_pdf_latex_document_multi(items: List[Tuple[str, str, str]]) -> str:
+def _build_pdf_latex_document_multi(items: List[Tuple[str, str, str]], omit_empty_theorems: bool = False) -> str:
     """多题版：一个 PDF 内包含多题。
 
     布局约定：
@@ -2231,7 +2232,7 @@ def _build_pdf_latex_document_multi(items: List[Tuple[str, str, str]]) -> str:
         theorems_list.append(t)
 
     theorems_all = "\n\n".join(theorems_list).strip()
-    if not theorems_all:
+    if not theorems_all and not omit_empty_theorems:
         theorems_all = (
             r"\begin{theoremBox}{常用结论}" + "\n"
             r"本题仅用到基础运算与常用恒等变形" + "\n"
@@ -2239,8 +2240,7 @@ def _build_pdf_latex_document_multi(items: List[Tuple[str, str, str]]) -> str:
         )
 
     parts += [
-        r"\section*{解题所需结论}",
-        theorems_all,
+        *([r"\section*{解题所需结论}", theorems_all] if theorems_all else []),
         "",
         r"\section*{解答}",
     ]

@@ -2,6 +2,7 @@
 try:
     from .shared import *
     from .pdf_styles import randomized_pdf_style
+    from .pdf_prompt_preferences import PdfPromptPreferences, user_key, preference_context, compose_pdf_prompt
     from .usage_tracking import tracked_generation, record_model_call
     from .token_usage import generate_with_token_usage
     from .qq_image_recovery import (PdfImageInputError, QqImageRecoveryMixin,
@@ -9,6 +10,7 @@ try:
 except ImportError:
     from shared import *
     from pdf_styles import randomized_pdf_style
+    from pdf_prompt_preferences import PdfPromptPreferences, user_key, preference_context, compose_pdf_prompt
     from usage_tracking import tracked_generation, record_model_call
     from token_usage import generate_with_token_usage
     from qq_image_recovery import (PdfImageInputError, QqImageRecoveryMixin,
@@ -752,6 +754,14 @@ class PdfMixin(QqImageRecoveryMixin):
             ref_pdf_latex: str = "",
     ):
         """LLM -> LaTeX -> PDF（仅本地 xelatex 编译）"""
+        # One immutable snapshot per PDF job; never affect shared builders used by /spdf.
+        personal_prompt = await asyncio.to_thread(PdfPromptPreferences(self.DATA_DIR).get, user_key(event))
+        personal_context = preference_context(
+            personal_prompt, str(getattr(event, "message_str", "") or ""), problem_text,
+        )
+        def with_preferences(builder):
+            return lambda spec: compose_pdf_prompt(builder(spec), personal_context)
+
         primary_provider_id = str(self._cfg("pdf_provider_id", "") or "").strip()
         gpt_requested = self._pdf_requests_gpt_model(problem_text)
         gpt_provider_id = str(self._cfg("pdf_gpt_provider_id", "") or "").strip() if gpt_requested else ""
@@ -811,12 +821,12 @@ class PdfMixin(QqImageRecoveryMixin):
 
         raw, provider_id, _initial_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
                 provider_chain=provider_chain,
-                prompt=prompt,
+                prompt=with_preferences(prompt),
                 image_urls=image_urls,
                 purpose="initial",
         )
         provider_chain = self._pdf_prioritize_provider_chain(provider_chain, provider_id)
-        parsed = _pdf_raw_to_latex_parts(raw, problem_text=problem_text, has_image=has_image)
+        parsed = _pdf_raw_to_latex_parts(raw, problem_text=problem_text, has_image=has_image, preserve_empty_theorems=bool(personal_prompt))
         raw = str(parsed.get("raw", "") or "")
         problem_tex = str(parsed.get("problem_tex", "") or "")
         theorems_tex = str(parsed.get("theorems_tex", "") or "")
@@ -873,12 +883,12 @@ class PdfMixin(QqImageRecoveryMixin):
 
                         raw, provider_id, _repair_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
                                 provider_chain=provider_chain,
-                                prompt=repair_prompt,
+                                prompt=with_preferences(repair_prompt),
                                 image_urls=image_urls,
                                 purpose="compile_repair",
                         )
                         provider_chain = self._pdf_prioritize_provider_chain(provider_chain, provider_id)
-                        parsed = _pdf_raw_to_latex_parts(raw, problem_text=problem_text, has_image=has_image)
+                        parsed = _pdf_raw_to_latex_parts(raw, problem_text=problem_text, has_image=has_image, preserve_empty_theorems=bool(personal_prompt))
                         raw = str(parsed.get("raw", "") or "")
                         problem_tex = str(parsed.get("problem_tex", "") or "")
                         theorems_tex = str(parsed.get("theorems_tex", "") or "")
@@ -899,6 +909,7 @@ class PdfMixin(QqImageRecoveryMixin):
                         problem_text=problem_text,
                         problem_tex=problem_tex,
                         solution_tex=solution_tex,
+                        preference_scope=personal_context,
                         preferred_provider_id=str(self._cfg("pdf_completeness_guard_provider_id", "") or "").strip(),
                         fallback_provider_id=(current_provider_id or provider_id or "").strip(),
                     )
@@ -922,12 +933,12 @@ class PdfMixin(QqImageRecoveryMixin):
 
                     raw, provider_id, _repair_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
                             provider_chain=provider_chain,
-                            prompt=repair_prompt,
+                            prompt=with_preferences(repair_prompt),
                             image_urls=image_urls,
                             purpose="completeness_repair",
                     )
                     provider_chain = self._pdf_prioritize_provider_chain(provider_chain, provider_id)
-                    parsed = _pdf_raw_to_latex_parts(raw, problem_text=problem_text, has_image=has_image)
+                    parsed = _pdf_raw_to_latex_parts(raw, problem_text=problem_text, has_image=has_image, preserve_empty_theorems=bool(personal_prompt))
                     raw = str(parsed.get("raw", "") or "")
                     problem_tex = str(parsed.get("problem_tex", "") or "")
                     theorems_tex = str(parsed.get("theorems_tex", "") or "")
@@ -1005,11 +1016,11 @@ class PdfMixin(QqImageRecoveryMixin):
                 try:
                     raw_next, provider_next, _compile_fallback_attempted_provider_ids = await self._pdf_llm_generate_with_fallback(
                         provider_chain=[spec],
-                        prompt=prompt,
+                        prompt=with_preferences(prompt),
                         image_urls=image_urls,
                         purpose="compile_fallback",
                     )
-                    parsed_next = _pdf_raw_to_latex_parts(raw_next, problem_text=problem_text, has_image=has_image)
+                    parsed_next = _pdf_raw_to_latex_parts(raw_next, problem_text=problem_text, has_image=has_image, preserve_empty_theorems=bool(personal_prompt))
                     candidate_tex_src = str(parsed_next.get("tex_src", "") or "")
                     candidate_pdf = await self._compile_tex_to_pdf(candidate_tex_src)
 
@@ -1320,6 +1331,7 @@ class PdfMixin(QqImageRecoveryMixin):
             solution_tex: str,
             preferred_provider_id: str = "",
             fallback_provider_id: str = "",
+            preference_scope: str = "",
     ) -> (bool, List[str]):
         """可选：用一个“完整性守门模型”判断解答是否写完/是否漏答多问。
         返回：(是否通过, 缺失点列表)。"""
@@ -1423,6 +1435,10 @@ class PdfMixin(QqImageRecoveryMixin):
             + "[problem_tex]\n" + (ptex or "(empty)") + "\n\n"
             + "[solution_tex]\n" + (stex or "(empty)") + "\n"
         )
+
+        if preference_scope:
+            prompt += (preference_scope + "\n完整性仅按上述有效要求审查。用户要求的省略、提示式解答、"
+                       "限定小问、简短回答或不附例题，不属于漏答。仍只输出上述 JSON。\n")
 
         try:
             timeout_sec = self._pdf_timeout_for_provider(provider)

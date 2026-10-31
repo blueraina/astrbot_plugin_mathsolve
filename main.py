@@ -21,6 +21,7 @@ try:
     from .markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
     from .markdown_command import MarkdownMixedMessageFilter
     from .pdf_theme_commands import PdfThemeMixin
+    from .pdf_prompt_preferences import PdfPromptMixin, PdfPromptError, prompt_command, pdf_prompt_reply
     from .grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from .group_message_gate import GroupMessageGate, group_key
     from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
@@ -38,6 +39,7 @@ except ImportError:
     from markdown_output import MarkdownOutputMixin, markdown_document_requested, constrain_markdown_tool
     from markdown_command import MarkdownMixedMessageFilter
     from pdf_theme_commands import PdfThemeMixin
+    from pdf_prompt_preferences import PdfPromptMixin, PdfPromptError, prompt_command, pdf_prompt_reply
     from grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from group_message_gate import GroupMessageGate, group_key
     from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
@@ -192,7 +194,7 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
 class Md2ImgSolveMathPdfTool(FunctionTool[AstrAgentContext]):
     """调用插件内置 PDF 生成（/pdf）逻辑。"""
     name: str = "md2img_solve_math_pdf"
-    description: str = "根据题目文字(可选)+图片URL(可选)生成 LaTeX 并用本地 xelatex 编译 PDF，然后把 PDF 发送到当前会话。"
+    description: str = "根据题目文字(可选)+图片URL(可选)生成 LaTeX 并用本地 xelatex 编译 PDF，然后把 PDF 发送到当前会话。自动应用调用者保存的 PDF 个人提示词，本次明确要求优先；problem_text 应保留用户本次的全部要求。"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -448,15 +450,50 @@ class MathsolveGradingTool(FunctionTool[AstrAgentContext]):
         return json.dumps(result, ensure_ascii=False)
 
 
+
+@dataclass
+class MathsolvePdfPromptTool(FunctionTool[AstrAgentContext]):
+    name: str = "mathsolve_pdf_prompt"
+    description: str = (
+        "查看、设置或清除调用者本人的 PDF 长期个人提示词。只作用于 /pdf 和 md2img_solve_math_pdf，"
+        "不影响 /spdf、/md、图片答疑或批改。每人一份，set 完整替换；本次明确要求优先于个人提示词，个人提示词优先于默认解题要求。"
+        "仅在用户明确要求保存/更改长期 PDF 默认偏好时 set，明确要求清除时 clear；"
+        "只针对这道题的临时要求应传给 PDF 生成工具，不得修改长期设置。get 查询当前设置。"
+        "保存偏好并生成 PDF 时先调用本工具，等成功后再调用生成工具。返回失败时如实说明，不得声称保存成功。"
+    )
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["get", "set", "clear"]},
+            "text": {"type": "string", "maxLength": 4000, "description": "set 必填，完整的新个人提示词；保留多行。get/clear 不填。"},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    })
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        plugin = _md2img_get_plugin()
+        _, event = _md2img_tool_extract_ctx_event(context)
+        try:
+            result = await plugin._pdf_prompt_run(event, kwargs.get("action"), kwargs.get("text", ""))
+        except PdfPromptError as exc:
+            result = {"ok": False, "error": str(exc)}
+        except Exception:
+            result = {"ok": False, "error": "PDF 提示词读取或保存失败，未确认修改成功，请稍后重试。"}
+        if event is not None:
+            event.set_extra("mathsolve_pdf_prompt_result", result)
+        return json.dumps(result, ensure_ascii=False)
+
+
 # 插件定义
 # -------------------------------------------------------------------------
 @register(
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.8",
+    "1.18.9",
 )
-class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
+class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
         self.config: Dict[str, Any] = dict(config) if isinstance(config, dict) else {}
@@ -509,8 +546,9 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
                 Md2ImgSolveMathSpdfTool(),
                 Md2ImgSolveMathMdTool(),
                 MathsolveGradingTool(),
+                MathsolvePdfPromptTool(),
             )
-            logger.info("[md2img] 已注册 LLM Tools: md2img_render_markdown / md2img_solve_math_pdf / md2img_solve_math_spdf / md2img_solve_math_md / mathsolve_grading")
+            logger.info("[md2img] 已注册 LLM Tools: md2img_render_markdown / md2img_solve_math_pdf / md2img_solve_math_spdf / md2img_solve_math_md / mathsolve_grading / mathsolve_pdf_prompt")
         except Exception as e:
             try:
                 tool_mgr = self.context.provider_manager.llm_tools
@@ -519,6 +557,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
                 tool_mgr.func_list.append(Md2ImgSolveMathSpdfTool())
                 tool_mgr.func_list.append(Md2ImgSolveMathMdTool())
                 tool_mgr.func_list.append(MathsolveGradingTool())
+                tool_mgr.func_list.append(MathsolvePdfPromptTool())
                 logger.info("[md2img] 已通过旧版接口注册 LLM Tools")
             except Exception as e2:
                 logger.warning(f"[md2img] 注册 LLM Tools 失败（不影响其它功能）: {e} / {e2}")
@@ -562,7 +601,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.8 - 数学问题默认图片回答)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.9 - PDF 个人提示词)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
@@ -647,6 +686,8 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
     # === 全局消息监听：记录用户最后发的图片 & 活跃时间 ===
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
+        if prompt_command(event):
+            return  # Settings are not question/image inputs.
         if grading_intent(event):
             return  # Grading resolves its own transient inputs; no archive of originals.
         if re.fullmatch(r"\s*/?(?:elmute|elstart)\s*", str(getattr(event, "message_str", "") or "")):
@@ -1720,6 +1761,11 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
         if msg:
             yield event.plain_result(msg)
 
+    @filter.command("pdf提示词")
+    async def cmd_pdf_prompt(self, event: AstrMessageEvent):
+        async for result in self._pdf_prompt_command(event):
+            yield result
+
     @filter.command("pdf主题")
     async def cmd_pdf_theme(self, event: AstrMessageEvent, theme: str = ""):
         async for result in self._pdf_theme_command(event, theme):
@@ -2160,7 +2206,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
         if event.get_extra("mathsolve_grading_generation"):
             self._disable_llm_tools_in_req(req)
             return
-        if event.get_extra("md2img_pdf_theme_command"):
+        if event.get_extra("md2img_pdf_theme_command") or event.get_extra("mathsolve_pdf_prompt_command"):
             return
         forward_status = await prepare_forward_reply_evidence(event)
         if forward_status:
@@ -2526,6 +2572,11 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
     # ---------- LLM响应：full 强制 <md>；hint 预计算提示流 ----------
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
+        preference_reply = pdf_prompt_reply(event)
+        if preference_reply is not None and not getattr(resp, "tools_call_name", None):
+            resp.result_chain = None
+            resp.completion_text = preference_reply
+            return
         if event.get_extra("mathsolve_grading_generation") or event.get_extra("mathsolve_grading_command"):
             return
         tool_reply = grading_tool_reply(event)
@@ -2538,7 +2589,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
         if grading_intent(event):
             resp.completion_text = plain_reply_text(resp.completion_text or "")
             return
-        if event.get_extra("md2img_pdf_theme_command"):
+        if event.get_extra("md2img_pdf_theme_command") or event.get_extra("mathsolve_pdf_prompt_command"):
             return
         if event.get_extra("md2img_pdf_generation") or event.get_extra("mathsolve_md_generation"):
             return  # Internal LaTeX generation is never an image-chat response.
@@ -2654,6 +2705,12 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
     # ---------------- 装饰结果：hint 逐条消息；否则 Markdown->图片 ----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
+        preference_reply = pdf_prompt_reply(event)
+        if preference_reply is not None:
+            result = event.get_result()
+            if result is not None:
+                result.chain = [Plain(preference_reply)]
+            return
         if not event.get_extra("mathsolve_grading_generation") and not event.get_extra("mathsolve_grading_command"):
             tool_reply = grading_tool_reply(event)
             if tool_reply is not None:
@@ -2663,7 +2720,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfThemeMixin, MarkdownOutputMixin, 
                 return
         if event.get_extra("mathsolve_grading_command") or grading_intent(event):
             return
-        if event.get_extra("md2img_pdf_theme_command"):
+        if event.get_extra("md2img_pdf_theme_command") or event.get_extra("mathsolve_pdf_prompt_command"):
             return
         if event.get_extra("mathsolve_md_generation") or markdown_document_requested(event):
             return  # /md status/errors and file are never a screenshot response.
