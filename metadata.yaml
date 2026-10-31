@@ -1,5 +1,5 @@
 name: astrbot_plugin_mathsolve # 这是你的插件的唯一识别名。
 desc: 一个功能丰富的 AstrBot 插件，集成 Markdown 渲染、支持数学，甚至全学科答疑！支持PDF 生成(支持画图)、DeepThink 多角色迭代求解、知识库检索及对话记忆等能力 # 插件简短描述
-version: v1.18.7 # 批改排版与工具结果反馈修复
+version: v1.18.8 # 数学问题默认图片回答
 author: blueraina # 作者
 repo: https://github.com/blueraina/astrbot_plugin_mathsolve # 插件的仓库地址

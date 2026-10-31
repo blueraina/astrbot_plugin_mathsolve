@@ -11,10 +11,11 @@ class ImageReplyDecision:
     image_requested: bool = False
     math_request: bool = False
     text_only: bool = False
+    document_requested: bool = False
 
     @property
     def allowed(self):
-        return not self.text_only and (self.image_requested or self.math_request)
+        return not self.text_only and not self.document_requested and (self.image_requested or self.math_request)
 
 
 _TEXT_ONLY = re.compile(
@@ -52,6 +53,60 @@ _PROBLEM_REQUEST = re.compile(
     r'|(?:找|检索|挑选).{0,12}(?:数学题|习题|练习题)')
 _IMAGE_SOLVE = re.compile(r'^(?:请|麻烦|帮我|能不能|可以)?\s*(?:解答|解一下|做一下|求解|批改|验算|检查解答|给出解答)(?:一下|下|这张图|图片中题目|图中的题|这道|全部|这题|这道题|吧|吗|。|！|!|？|\?|\s)*$')
 _NO_SOLVE = re.compile(r'(?:不要|别|不用|无需|不需要).{0,6}(?:解题|解答|证明|求解|计算)')
+_DOCUMENT_REQUEST = re.compile(
+    r'^/?(?:s?pdf|md)(?:\s|$)|(?:用|以|按|生成|导出|给我|发我|输出|整理成|转成|转为)\s*(?:一份|一个)?\s*'
+    r'(?:PDF|Markdown|(?<![a-zA-Z])\.?md\b)(?:\s|格式|文档|文件|版|解答|回答|解释|讲解|证明|$)', re.I)
+_GENERAL_MATH_TOPIC = re.compile(
+    _MATH_TOPIC.pattern + r'|数学|高数|线代|微积分|线性代数|抽象代数|数论|几何|拓扑|统计|随机变量|'
+    r'实分析|复分析|泛函分析|数学分析|实变|复变|集合|映射|同构|同态|线性空间|子空间|内积|范数|'
+    r'度量|紧性|紧致|完备|连通|开集|闭集|开覆盖|子覆盖|一致连续|一致收敛|可测|测度|可积|黎曼|勒贝格|傅里叶|泰勒|'
+    r'拉格朗日|拉普拉斯|柯西|欧拉|贝叶斯|马尔可夫|群论|环论|域论|模论|子群|商群|正规群|'
+    r'(?:素|极大|主|零|双边|左|右)理想|商环|谱分解|奇异值分解|'
+    r'特征多项式|最小多项式|Jordan|Banach|Hilbert|Fourier|Laplace|Taylor|Cauchy|'
+    r'公式|恒等式|等式|表达式|代数式|奇数|偶数|素数|质数|整数|有理数|无理数|复数|数域|'
+    r'\b(?:math(?:ematics)?|calculus|algebra|geometry|topology|theorem|proof|isomorphism|'
+    r'compactness|continuity|convergence|integral|derivative|matrix|eigenvalue|probability)\b', re.I)
+_CONCEPT_QUESTION = re.compile(
+    r'[?？]|什么|怎么|如何|怎样|为何|为什么|是否|区别|联系|关系|含义|意义|本质|直观|定义|'
+    r'解释|讲解|讲讲|介绍|理解|举例|例子|反例|性质|应用|中的|有哪些|吗|呢|看不懂|没明白|不理解|推荐|教材|学习|'
+    r'\b(?:what|why|how|explain|define|compare|describe)\b', re.I)
+_SOFTWARE_QUESTION = re.compile(
+    r'Excel|Word|PPT|WPS|LaTeX|Markdown|MathJax|KaTeX|Python|JavaScript|'
+    r'编程|代码|函数库|软件|网页|渲染|公式编辑器|排版|乱码|安装|配置|快捷键|字体', re.I)
+
+
+def routing_text(text):
+    return re.sub(r'(?m)^\s*>[^\n]*$|```[\s\S]*?```|~~~[\s\S]*?~~~', '',
+                  unicodedata.normalize('NFKC', str(text or ''))).strip()
+
+
+def _general_math_request(text):
+    if _SOFTWARE_QUESTION.search(text) or _NON_TASK.search(text):
+        return False
+    if re.search(r'(?:哪里|几点|何时|在哪|一起|大家).{0,8}集合|连续.{0,8}(?:下雨|加班|熬夜|打卡|播放)', text):
+        return False
+    return bool(_GENERAL_MATH_TOPIC.search(text) and
+                (_CONCEPT_QUESTION.search(text) or _GENERAL_MATH_TOPIC.fullmatch(text.rstrip('。!！'))))
+
+
+def _semantic_binding(event):
+    return (str(getattr(event, 'unified_msg_origin', '')), str(event.get_sender_id()),
+            str(getattr(getattr(event, 'message_obj', None), 'message_id', '')),
+            str(getattr(event, 'message_str', '') or ''))
+
+
+def mark_semantic_math(event):
+    event.set_extra('mathsolve_semantic_math', _semantic_binding(event))
+
+
+def should_route_math(event):
+    """Use the optional router for unfamiliar mathematical terminology."""
+    text = routing_text(getattr(event, 'message_str', ''))
+    decision = image_reply_decision(event)
+    return bool(text and len(text) <= 2000 and not text.startswith('/')
+                and not decision.allowed and not decision.text_only and not decision.document_requested
+                and not _SOFTWARE_QUESTION.search(text) and not _NON_TASK.search(text)
+                and _CONCEPT_QUESTION.search(text))
 
 # Follow-ups require evidence from this turn's exact quote, not group history.
 _GRADING = re.compile(r'评分|打分|评卷|判卷|批改|重评|复核|扣分|给分|改分|满分|判错|改错')
@@ -108,16 +163,20 @@ def _reasoning_request(text):
 
 def _math_followup(text):
     # A broader explanation verb is safe only with this turn's quoted math.
-    return bool(_FOLLOWUP.search(text) or
+    return bool(_FOLLOWUP.search(text) or re.search(r'举个?例|反例|这是什么意思|没明白|看不懂', text) or
                 (not _REASONING_NON_TASK.search(text) and _REASONING_ACTION.search(text)))
 
 
 def _math_evidence(text):
     """Reference content is topic evidence, never an output instruction."""
     text = unicodedata.normalize('NFKC', str(text or ''))[:16000]
+    concept_definition = bool(not _SOFTWARE_QUESTION.search(text) and not _NON_TASK.search(text)
+                              and _GENERAL_MATH_TOPIC.search(text)
+                              and (re.search(r'是|指|定义|满足|称为|对于|\b(?:is|means|defined)\b', text, re.I)
+                                   or len(_GENERAL_MATH_TOPIC.findall(text)) >= 2))
     return bool(_FORMULA.search(text) or
                 (_MATH_TOPIC.search(text) and _SOLVE_ACTION.search(text)) or
-                _reasoning_request(text) or
+                _reasoning_request(text) or _general_math_request(text) or concept_definition or
                 (re.search(r'解答|证明|得分|扣分|满分', text) and
                  re.search(r'题目|试卷|作业|数学|积分|矩阵|不等式|导数', text)))
 
@@ -279,12 +338,13 @@ def classify_image_reply(text, *, has_image=False, has_reply=False, math_context
     # Normalize only the detection copy. Never rewrite the question or answer.
     text = unicodedata.normalize('NFKC', text)
     # Quotes, examples and source blocks are data, not a new output instruction.
-    intent = re.sub(r'(?m)^\s*>[^\n]*$|```[\s\S]*?```|~~~[\s\S]*?~~~', '', text)
+    intent = routing_text(text)
     text_only = bool(_TEXT_ONLY.search(intent))
     image_requested = bool(_IMAGE_REQUEST.search(intent)) and not text_only
     if re.search(r'^(?:请问)?(?:如何|怎么|为什么|为何).{0,24}(?:生成|渲染|转成|转为).{0,8}(?:图片|长图|截图)', intent):
         image_requested = False
     math_request = bool(_PROBLEM_REQUEST.search(intent))
+    math_request |= _general_math_request(intent)
     math_request |= bool(_MATH_TOPIC.search(intent) and _SOLVE_ACTION.search(intent))
     if not _NON_TASK.search(intent):
         math_request |= _reasoning_request(intent)
@@ -294,9 +354,11 @@ def classify_image_reply(text, *, has_image=False, has_reply=False, math_context
     math_request |= bool(_SYMBOLIC_CALCULUS.search(intent))
     math_request |= bool(_MATH_TOPIC.search(intent) and _SYMBOLIC_VALUE.search(intent))
     math_request |= bool((has_image or has_reply) and _IMAGE_SOLVE.fullmatch(intent))
-    if _NO_SOLVE.search(intent):
+    if _NO_SOLVE.search(intent) and not _general_math_request(intent):
         math_request = False
-    return ImageReplyDecision(image_requested, math_request, text_only)
+    document_intent = re.sub(r'(?:不要|不用|别|无需|不需要)\s*(?:用|发|生成|输出)?\s*'
+                             r'(?:PDF|Markdown|\.?md)(?![a-zA-Z])', '', intent, flags=re.I)
+    return ImageReplyDecision(image_requested, math_request, text_only, bool(_DOCUMENT_REQUEST.search(document_intent)))
 
 
 def _event_decision(event, *, inherited_math=False):
@@ -313,8 +375,14 @@ def _event_decision(event, *, inherited_math=False):
             has_reply |= bool(inputs.get('has_reply'))
     except Exception:
         pass
-    return classify_image_reply(text, has_image=has_image or quote_image, has_reply=has_reply,
-                                math_context=quote_math or (inherited_math and not has_reply))
+    decision = classify_image_reply(text, has_image=has_image or quote_image, has_reply=has_reply,
+                                    math_context=quote_math or (inherited_math and not has_reply))
+    try:
+        if event.get_extra('mathsolve_semantic_math') == _semantic_binding(event):
+            return ImageReplyDecision(decision.image_requested, True, decision.text_only, decision.document_requested)
+    except (AttributeError, TypeError):
+        pass
+    return decision
 
 
 def _same_owner(first, second):
@@ -368,7 +436,7 @@ def image_reply_decision(event):
                 # A continuation does not silently cancel an explicit text-only
                 # instruction from this run. A later explicit image request can.
                 if decision.text_only and not next_decision.image_requested:
-                    next_decision = ImageReplyDecision(False, next_decision.math_request, True)
+                    next_decision = ImageReplyDecision(False, next_decision.math_request, True, next_decision.document_requested)
                 decision = next_decision
                 inherited = decision.math_request or _quoted_evidence(candidate)[0]
     except (AttributeError, TypeError, ValueError):
@@ -394,6 +462,15 @@ def image_tool_already_sent(event):
 def constrain_image_tool(req, decision):
     """Filter a request-local copy. Never mutate the globally registered ToolSet."""
     if decision.allowed:
+        marker = '[本轮优先图片回答]'
+        prompt = str(getattr(req, 'system_prompt', '') or '')
+        if marker not in prompt:
+            req.system_prompt = prompt + '\n' + marker + (
+                '数学相关问题默认优先用图片回答，概念解释、定理讨论、证明计算和数学追问都适用，无须用户说“图片”。'
+                '先完成必要的检索和推理，再把本轮完整回答交给 md2img_render_markdown 渲染发送。'
+                '传入普通 Markdown，不带 <md> 标签。只要提示时只给提示，不能擅自变成完整解答。'
+                '工具已成功发送图片后只简短确认，不重复发送大段 Markdown 或重复调用图片工具。'
+                '若图片工具不可用，可用 <md>...</md> 包裹最终回答交由插件渲染；渲染失败时如实说明。\n')
         return
     toolset = getattr(req, 'func_tool', None)
     if toolset is not None and isinstance(getattr(toolset, 'tools', None), list):
@@ -404,6 +481,7 @@ def constrain_image_tool(req, decision):
     prompt = str(getattr(req, 'system_prompt', '') or '')
     if marker not in prompt:
         req.system_prompt = prompt + '\n' + marker + (
-            '本轮使用普通文字回复，不调用 md2img_render_markdown，不输出 <md> 标签。'
+            ('本轮按用户指定的文档格式回复，不调用 md2img_render_markdown，不输出 <md> 标签。'
+             if decision.document_requested else '本轮使用普通文字回复，不调用 md2img_render_markdown，不输出 <md> 标签。') +
             '用户发来图片、引用图片，或正文含公式/表格/代码，不代表用户要求图片回复。'
             '保留正常回答内容；此限制不影响用户明确请求的 PDF 或其他工具。\n')

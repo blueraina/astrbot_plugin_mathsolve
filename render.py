@@ -47,7 +47,7 @@ class RenderMixin:
 
         if "<md>" not in text:
             is_complex = re.search(r"(```|\$\$|\|.*?\|.*?\||\\begin\{)", text, re.DOTALL)
-            if is_complex or decision.image_requested:
+            if is_complex or decision.image_requested or decision.math_request:
                 text = f"<md>\n{text}\n</md>"
 
         # 所有普通 Markdown 渲染也走统一解析；用户 /pc、/pe 设置始终最高优先级。
