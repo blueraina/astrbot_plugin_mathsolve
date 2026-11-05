@@ -1,4 +1,4 @@
-"""Per-turn image delivery permission, based on the user request, never the answer."""
+"""Explicit formats win; ordinary answers prefer images with a final content fallback."""
 from copy import copy
 from dataclasses import dataclass
 import asyncio
@@ -12,10 +12,11 @@ class ImageReplyDecision:
     math_request: bool = False
     text_only: bool = False
     document_requested: bool = False
+    default_image: bool = False
 
     @property
     def allowed(self):
-        return not self.text_only and not self.document_requested and (self.image_requested or self.math_request)
+        return not self.text_only and not self.document_requested and (self.image_requested or self.math_request or self.default_image)
 
 
 _TEXT_ONLY = re.compile(
@@ -23,6 +24,7 @@ _TEXT_ONLY = re.compile(
     r'|(?:只用|只要|直接用|改用|用纯|纯)(?:文字|文本)'
     r'|(?:文字|文本)(?:回复|回答|作答|解答|解释|说明|讲解|版|形式|格式)'
     r'|(?:用|以)(?:纯)?(?:文字|文本)(?:来|重新|再)?(?:评分|批改|解释|解答|说明|回答|回复)'
+    r'|(?:直接|只|给我|输出|返回).{0,8}(?:源码|源代码)'
     r'|\b(?:text[ -]only|no images?|do not (?:send|use) images?)\b', re.I)
 _IMAGE_REQUEST = re.compile(
     r'(?:用|以)(?:[\w\s]{0,12}的)?(?:一张)?(?:图片|截图|长图)(?:的)?(?:形式|方式|格式)?(?:回|答|发|呈现|展示)'
@@ -55,8 +57,10 @@ _PROBLEM_REQUEST = re.compile(
 _IMAGE_SOLVE = re.compile(r'^(?:请|麻烦|帮我|能不能|可以)?\s*(?:解答|解一下|做一下|求解|批改|验算|检查解答|给出解答)(?:一下|下|这张图|图片中题目|图中的题|这道|全部|这题|这道题|吧|吗|。|！|!|？|\?|\s)*$')
 _NO_SOLVE = re.compile(r'(?:不要|别|不用|无需|不需要).{0,6}(?:解题|解答|证明|求解|计算)')
 _DOCUMENT_REQUEST = re.compile(
-    r'^/?(?:s?pdf|md)(?:\s|$)|(?:用|以|按|生成|导出|给我|发我|输出|整理成|转成|转为)\s*(?:一份|一个)?\s*'
-    r'(?:PDF|Markdown|(?<![a-zA-Z])\.?md\b)(?:\s|格式|文档|文件|版|解答|回答|解释|讲解|证明|$)', re.I)
+    r'^/?(?:s?pdf|md)(?:\s|$)|(?:用|以|按|生成|导出|给我|给|发我|发|要|输出|整理成|转成|转为|保存为)\s*(?:一份|一个)?\s*'
+    r'(?:PDF|Markdown|(?<![a-zA-Z])\.?md\b)(?:\s|格式|文档|文件|版|解答|回答|解释|讲解|证明|$)'
+    r'|(?:PDF|Markdown|\.?md)\s*(?:文档|文件|格式|形式|版)\s*(?:给我|发我|输出|解答|回答|回复)'
+    r'|\b(?:answer|reply|respond|output)\b.{0,15}\b(?:in|as)\s+(?:PDF|Markdown|md)\b', re.I)
 _GENERAL_MATH_TOPIC = re.compile(
     _MATH_TOPIC.pattern + r'|数学|高数|线代|微积分|线性代数|抽象代数|数论|几何|拓扑|统计|随机变量|'
     r'实分析|复分析|泛函分析|数学分析|实变|复变|集合|映射|同构|同态|线性空间|子空间|内积|范数|'
@@ -105,7 +109,8 @@ def should_route_math(event):
     text = routing_text(getattr(event, 'message_str', ''))
     decision = image_reply_decision(event)
     return bool(text and len(text) <= 2000 and not text.startswith('/')
-                and not decision.allowed and not decision.text_only and not decision.document_requested
+                and not decision.math_request and not decision.image_requested
+                and not decision.text_only and not decision.document_requested
                 and not _SOFTWARE_QUESTION.search(text) and not _NON_TASK.search(text)
                 and _CONCEPT_QUESTION.search(text))
 
@@ -361,12 +366,17 @@ def classify_image_reply(text, *, has_image=False, has_reply=False, math_context
         math_request = False
     document_intent = re.sub(r'(?:不要|不用|别|无需|不需要)\s*(?:用|发|生成|输出)?\s*'
                              r'(?:PDF|Markdown|\.?md)(?![a-zA-Z])', '', intent, flags=re.I)
-    return ImageReplyDecision(image_requested, math_request, text_only, bool(_DOCUMENT_REQUEST.search(document_intent)))
+    command = intent.startswith('/')
+    default_image = bool(intent or has_image or has_reply) and not command and not _SHORT_ACK.fullmatch(intent)
+    return ImageReplyDecision(image_requested, math_request, text_only or command,
+                              bool(_DOCUMENT_REQUEST.search(document_intent)), default_image)
 
 
 def _event_decision(event, *, inherited_math=False):
     if event is None:
         return ImageReplyDecision()
+    if any(event.get_extra(key) for key in _INTERNAL_OUTPUT):
+        return ImageReplyDecision(text_only=True)
     text = str(getattr(event, 'message_str', '') or '').strip()
     components = getattr(getattr(event, 'message_obj', None), 'message', None) or []
     has_image = any(_kind(c) == 'image' for c in components)
@@ -382,7 +392,7 @@ def _event_decision(event, *, inherited_math=False):
                                     math_context=quote_math or (inherited_math and not has_reply))
     try:
         if event.get_extra('mathsolve_semantic_math') == _semantic_binding(event):
-            return ImageReplyDecision(decision.image_requested, True, decision.text_only, decision.document_requested)
+            return ImageReplyDecision(decision.image_requested, True, decision.text_only, decision.document_requested, decision.default_image)
     except (AttributeError, TypeError):
         pass
     return decision
@@ -436,10 +446,11 @@ def image_reply_decision(event):
             if (run_id and expected_id == run_id and _same_owner(event, candidate) and
                     isinstance(capture, dict) and str(capture.get('target_run_id') or '') == run_id):
                 next_decision = _event_decision(candidate, inherited_math=inherited)
-                # A continuation does not silently cancel an explicit text-only
-                # instruction from this run. A later explicit image request can.
+                # Follow-ups retain the explicit format until the user changes it.
                 if decision.text_only and not next_decision.image_requested:
                     next_decision = ImageReplyDecision(False, next_decision.math_request, True, next_decision.document_requested)
+                elif decision.document_requested and not (next_decision.image_requested or next_decision.text_only):
+                    next_decision = ImageReplyDecision(False, next_decision.math_request, False, True)
                 decision = next_decision
                 inherited = decision.math_request or _quoted_evidence(candidate)[0]
     except (AttributeError, TypeError, ValueError):
@@ -462,6 +473,47 @@ def image_tool_already_sent(event):
         return False
 
 
+_INTERNAL_OUTPUT = (
+    'md2img_pdf_generation', 'mathsolve_md_generation', 'mathsolve_grading_generation',
+    'mathsolve_grading_command', 'md2img_pdf_theme_command', 'mathsolve_pdf_prompt_command',
+)
+_SHORT_ACK = re.compile(r'\s*(?:你好|您好|嗨|早上好|晚上好|谢谢(?:你)?|多谢|不客气|收到|好的?|明白(?:了)?|'
+                        r'知道了|可以|嗯+|哈哈+|OK|hello|hi|thanks|thank you)[！!。.,，~～\s]*', re.I)
+
+
+def dense_markdown(text):
+    """Inspect final output independently of topic recognition or tool calls."""
+    text = str(text or '').strip()
+    if len(text) < 80:
+        return False
+    fenced = bool(re.search(r'(?m)^\s*(?:```|~~~)', text))
+    table = bool(re.search(r'(?m)^\s*\|?\s*:?-{3,}:?\s*\|', text))
+    display_math = bool(re.search(r'\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\begin\{(?:align\*?|equation\*?|gather\*?)\}', text))
+    headings = len(re.findall(r'(?m)^\s*#{1,6}\s+\S', text))
+    lists = len(re.findall(r'(?m)^\s*(?:[-*+] |\d+[.)] )\S', text))
+    bold = len(re.findall(r'\*\*[^\n*]+\*\*', text))
+    formulas = len(re.findall(r'(?<!\$)\$(?!\$)[^\n$]+\$(?!\$)|\\\([^\n]+?\\\)', text))
+    return (fenced or table or display_math or formulas >= 3 or
+            (len(text) >= 160 and headings + min(lists, 3) + min(bold, 3) >= 3))
+
+
+def should_render_answer(event, text):
+    """Final fallback cannot override an explicit format or duplicate tool delivery."""
+    if event is None or any(event.get_extra(key) for key in _INTERNAL_OUTPUT):
+        return False
+    decision = image_reply_decision(event)
+    if decision.text_only or decision.document_requested or image_tool_already_sent(event):
+        return False
+    content = plain_reply_text(text)
+    if not content:
+        return False
+    if dense_markdown(content):
+        return True
+    if decision.image_requested or decision.math_request:
+        return True
+    return decision.default_image and not _SHORT_ACK.fullmatch(content)
+
+
 def constrain_image_tool(req, decision):
     """Filter a request-local copy. Never mutate the globally registered ToolSet."""
     # A later captured follow-up can change the delivery format in this same run.
@@ -479,11 +531,13 @@ def constrain_image_tool(req, decision):
         prompt = str(getattr(req, 'system_prompt', '') or '')
         if marker not in prompt:
             req.system_prompt = prompt + '\n' + marker + (
-                '数学相关问题默认优先用图片回答，概念解释、定理讨论、证明计算和数学追问都适用，无须用户说“图片”。'
+                '用户未指定输出格式时，答疑默认优先用图片回答，无须用户说“图片”，不局限于已识别的数学关键词。'
+                '仅简短寒暄或确认可直接文字回复；明确要求纯文字、MD 或 PDF 时遵从用户指定格式。'
                 '先完成必要的检索和推理，再把本轮完整回答交给 md2img_render_markdown 渲染发送。'
                 '传入普通 Markdown，不带 <md> 标签。只要提示时只给提示，不能擅自变成完整解答。'
                 '工具已成功发送图片后只简短确认，不重复发送大段 Markdown 或重复调用图片工具。'
-                '若图片工具不可用，可用 <md>...</md> 包裹最终回答交由插件渲染；渲染失败时如实说明。\n')
+                '若未调用图片工具，正常输出完整 Markdown 即可，发送前会自动转图，不要把整篇回答套进 Markdown 代码块。'
+                '渲染失败时如实说明。\n')
         return
     toolset = getattr(req, 'func_tool', None)
     if toolset is not None and isinstance(getattr(toolset, 'tools', None), list):

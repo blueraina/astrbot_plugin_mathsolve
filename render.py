@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 try:
     from .shared import *
-    from .image_reply_policy import image_reply_decision, plain_reply_text, image_tool_already_sent
+    from .image_reply_policy import plain_reply_text, should_render_answer
 except ImportError:
     from shared import *
-    from image_reply_policy import image_reply_decision, plain_reply_text, image_tool_already_sent
+    from image_reply_policy import plain_reply_text, should_render_answer
 
 
 class RenderMixin:
@@ -40,11 +40,10 @@ class RenderMixin:
         return cur >= start or cur < end
 
     async def _process_text_with_markdown(self, text: str, event: AstrMessageEvent = None) -> List[Any]:
-        decision = image_reply_decision(event)
         content = plain_reply_text(text)
         if not content:
             return []
-        if not decision.allowed or image_tool_already_sent(event):
+        if not should_render_answer(event, text):
             return [Plain(content)]
         # Render the whole answer, including text outside incomplete/case-varied wrappers.
         if re.fullmatch(r"```(?:markdown|md)\s*\n[\s\S]*?\n```", content, re.I):

@@ -24,7 +24,7 @@ try:
     from .pdf_prompt_preferences import PdfPromptMixin, PdfPromptError, prompt_command, pdf_prompt_reply
     from .grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from .group_message_gate import GroupMessageGate, group_key
-    from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, image_tool_reply, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
+    from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, image_tool_reply, should_render_answer, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
 except ImportError:
     from shared import *
     from memory import MemoryMixin
@@ -42,7 +42,7 @@ except ImportError:
     from pdf_prompt_preferences import PdfPromptMixin, PdfPromptError, prompt_command, pdf_prompt_reply
     from grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from group_message_gate import GroupMessageGate, group_key
-    from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, image_tool_reply, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
+    from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, image_tool_reply, should_render_answer, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
 
 
 # =============================================================================
@@ -95,8 +95,8 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
     name: str = "md2img_render_markdown"
     description: str = (
         "将一段 Markdown(含 LaTeX/内联 SVG) 渲染成图片并发送到当前会话。"
-        "数学相关问题默认优先使用本工具，包括概念解释、定理讨论、证明计算和数学追问，无须用户明确要求图片。"
-        "用户明确要求图片时也可使用；普通聊天默认文字，用户明确要求纯文字或 PDF/Markdown 文档时遵从指定格式。"
+        "用户未指定格式时，答疑默认优先使用本工具，无须用户明确要求图片，也不局限于数学关键词。"
+        "简短寒暄或确认可用文字；明确要求纯文字、源码或 PDF/Markdown 文档时遵从指定格式。"
         "数学证明/解答必须在 Markdown 开头提供题目或证明目标卡片："
         "`> [problem-card]` 换行 `> **题目/证明目标：** ...`，随后再用 `## 一、证明过程` 等分节。"
     )
@@ -133,7 +133,7 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
             logger.info("[mathsolve] 阻止未获本轮用户意图许可的图片工具调用")
             return json.dumps({
                 "ok": False, "sent": 0, "error_code": "image_reply_not_requested",
-                "error": "本轮应遵循用户指定的文字或文档格式；普通聊天默认文字。不要再调用图片工具或添加 <md> 标签。",
+                "error": "本轮为简短寒暄、内部处理或已指定文字/文档格式。不要再调用图片工具或添加 <md> 标签。",
                 "reply_as_text": plain_reply_text(md_text),
             }, ensure_ascii=False)
 
@@ -498,7 +498,7 @@ class MathsolvePdfPromptTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.10",
+    "1.18.11",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -608,7 +608,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.10 - 图片答疑发送修复)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.11 - 默认图片与 Markdown 兜底)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
@@ -2615,7 +2615,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
             return  # Agent acknowledgements are text, not another image answer.
         raw = resp.completion_text or ""
         image_decision = image_reply_decision(event)
-        image_allowed = image_decision.allowed and not image_tool_already_sent(event)
+        image_allowed = should_render_answer(event, raw)
         if not image_allowed:
             resp.completion_text = plain_reply_text(raw)
             raw = resp.completion_text
@@ -2649,12 +2649,8 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
         has_img = bool(mf.get("has_image"))
 
         if mode == "full":
-            md_blocks = re.findall(r"<md>([\s\S]*?)</md>", raw)
-            if md_blocks:
-                joined = "\n\n".join([b.strip() for b in md_blocks if b.strip()]).strip()
-                resp.completion_text = f"<md>\n{joined or raw.strip()}\n</md>"
-            else:
-                resp.completion_text = f"<md>\n{raw.strip()}\n</md>"
+            # Keep explanations before/after wrappers as part of the same answer.
+            resp.completion_text = f"<md>\n{plain_reply_text(raw)}\n</md>"
             event.set_extra("raw_llm", resp.completion_text)
             # 写入对话记忆（full）
             try:
@@ -2720,7 +2716,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
                 logger.warning(f"chat memory store(hint) failed: {e}")
 
     # ---------------- 装饰结果：hint 逐条消息；否则 Markdown->图片 ----------------
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(priority=-100)
     async def on_decorating_result(self, event: AstrMessageEvent):
         image_reply = image_tool_reply(event)
         if image_reply is not None:
@@ -2789,10 +2785,16 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
         seen = set()
         async def render_chain(chain, depth=0):
             updated = []
+            pending = []
+            async def flush():
+                if pending:
+                    updated.extend(await self._process_text_with_markdown("".join(pending), event))
+                    pending.clear()
             for item in chain:
                 if isinstance(item, Plain):
-                    updated.extend(await self._process_text_with_markdown(item.text, event))
+                    pending.append(item.text)
                 else:
+                    await flush()
                     kind = type(item).__name__.lower()
                     attr = "content" if kind == "node" else "nodes" if kind == "nodes" else None
                     children = getattr(item, attr, None) if attr else None
@@ -2800,5 +2802,6 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
                         seen.add(id(item))
                         setattr(item, attr, await render_chain(children, depth+1))
                     updated.append(item)
+            await flush()
             return updated
         result.chain = await render_chain(result.chain)

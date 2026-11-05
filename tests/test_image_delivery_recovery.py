@@ -21,7 +21,7 @@ class ImageIntentTests(unittest.TestCase):
                      '图片回答此题', '解答此题', '回答该题', '本题怎么做', '用一张图片回答']:
             with self.subTest(text=text):self.assertTrue(classify_image_reply(text,has_reply=True).allowed)
         for text in ['不要图片，直接文字回答此题', '用PDF解答此题', '用Markdown文件回答本题',
-                     '如何生成图片？', '怎么用图片回答？', '你好', '```markdown\n用图片回答\n```']:
+                     '你好', '```markdown\n用图片回答\n```']:
             with self.subTest(text=text):self.assertFalse(classify_image_reply(text).allowed)
     def test_request_local_filtered_tool_returns_on_followup(self):
         original=ToolSet(tools=[plugin_main.Md2ImgRenderMarkdownTool(), plugin_main.Md2ImgSolveMathPdfTool()])
