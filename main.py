@@ -498,7 +498,7 @@ class MathsolvePdfPromptTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.12",
+    "1.18.13",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -608,7 +608,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.12 - 闲聊文字与数学图片分流)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.13 - 图片成功后不追加确认)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
@@ -2722,7 +2722,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
         if image_reply is not None:
             result = event.get_result()
             if result is not None:
-                result.chain = [Plain(image_reply)]
+                result.chain = [Plain(image_reply)] if image_reply else []
             return
         preference_reply = pdf_prompt_reply(event)
         if preference_reply is not None:

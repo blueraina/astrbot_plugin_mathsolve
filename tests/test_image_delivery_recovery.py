@@ -82,12 +82,17 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.event.get_result=lambda:rendered
         await self.plugin.on_decorating_result(self.event)
         self.assertEqual(rendered.get_plain_text(),result['error'])
-    async def test_success_uses_actual_ack_and_internal_pdf_is_not_overwritten(self):
+    async def test_success_suppresses_ack_and_internal_pdf_is_not_overwritten(self):
         result=json.loads(await plugin_main.Md2ImgRenderMarkdownTool().call(self.wrapper,markdown='# 解答'))
         self.assertTrue(result['ok'])
         resp=LLMResponse(role='assistant',completion_text='# 重复解答')
         await self.plugin.on_llm_resp(self.event,resp)
-        self.assertEqual(resp.completion_text,'图片解答已发送。')
+        self.assertEqual(resp.completion_text,'')
+        rendered=MessageEventResult(chain=[Comp.Reply(id='quoted'),Comp.Plain('图片解答已发送。')])
+        self.event.get_result=lambda:rendered
+        await self.plugin.on_decorating_result(self.event)
+        self.assertEqual(rendered.chain,[])
+        self.event.send.assert_awaited_once()
         self.event.set_extra('md2img_pdf_generation',True)
         resp=LLMResponse(role='assistant',completion_text='<solution>保留</solution>')
         await self.plugin.on_llm_resp(self.event,resp)

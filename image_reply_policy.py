@@ -534,7 +534,7 @@ def constrain_image_tool(req, decision):
                 '明确要求纯文字、MD 或 PDF 时遵从用户指定格式。'
                 '先完成必要的检索和推理，再把本轮完整回答交给 md2img_render_markdown 渲染发送。'
                 '传入普通 Markdown，不带 <md> 标签。只要提示时只给提示，不能擅自变成完整解答。'
-                '工具已成功发送图片后只简短确认，不重复发送大段 Markdown 或重复调用图片工具。'
+                '工具成功发送图片后结束回复，不追加文字确认，不重复发送大段 Markdown 或重复调用图片工具。'
                 '若未调用图片工具，正常输出完整 Markdown 即可，发送前会自动转图，不要把整篇回答套进 Markdown 代码块。'
                 '渲染失败时如实说明。\n')
         return
@@ -557,7 +557,7 @@ def constrain_image_tool(req, decision):
 
 
 def image_tool_reply(event):
-    """Use the real delivery outcome for the final acknowledgement."""
+    """Return empty text after success, an error after failure, or None when unrelated."""
     if event is None or any(event.get_extra(key) for key in (
         'md2img_pdf_generation', 'mathsolve_md_generation', 'mathsolve_grading_generation',
     )):
@@ -565,4 +565,4 @@ def image_tool_reply(event):
     result = event.get_extra('mathsolve_image_tool_result')
     if not isinstance(result, dict):
         return None
-    return '图片解答已发送。' if result.get('ok') else result.get('error', '图片暂时生成失败，请稍后重试。')
+    return '' if result.get('ok') else result.get('error', '图片暂时生成失败，请稍后重试。')
