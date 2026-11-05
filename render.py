@@ -41,76 +41,47 @@ class RenderMixin:
 
     async def _process_text_with_markdown(self, text: str, event: AstrMessageEvent = None) -> List[Any]:
         decision = image_reply_decision(event)
+        content = plain_reply_text(text)
+        if not content:
+            return []
         if not decision.allowed or image_tool_already_sent(event):
-            plain = plain_reply_text(text)
-            return [Plain(plain)] if plain else []
-
-        if "<md>" not in text:
-            is_complex = re.search(r"(```|\$\$|\|.*?\|.*?\||\\begin\{)", text, re.DOTALL)
-            if is_complex or decision.image_requested or decision.math_request:
-                text = f"<md>\n{text}\n</md>"
-
-        # 所有普通 Markdown 渲染也走统一解析；用户 /pc、/pe 设置始终最高优先级。
+            return [Plain(content)]
+        # Render the whole answer, including text outside incomplete/case-varied wrappers.
+        if re.fullmatch(r"```(?:markdown|md)\s*\n[\s\S]*?\n```", content, re.I):
+            content = re.sub(r"^```(?:markdown|md)\s*\n|\n```$", "", content, flags=re.I)
         user_mode = resolve_render_mode(event)
-
-        components: List[Any] = []
-        parts = re.split(r"(<md>.*?</md>)", text, flags=re.DOTALL)
-
-        for part in parts:
-            if part.startswith("<md>") and part.endswith("</md>"):
-                md_content = part[4:-5].strip()
-                if not md_content:
-                    continue
-
-                output_path = os.path.join(self.IMAGE_CACHE_DIR, f"{uuid.uuid4()}.png")
-
-                try:
-                    img_paths = await self._markdown_to_image_playwright(
-                        md_text=md_content,
-                        output_image_path=output_path,
-                        scale=2,
-                        mode=user_mode,
-                    )
-
-                    if img_paths:
-                        for p in img_paths:
-                            components.append(Image.fromFileSystem(p))
-                    else:
-                        components.append(Plain(f"--- 渲染失败 ---\n{md_content}"))
-                except Exception as e:
-                    logger.error(f"渲染异常: {e}")
-                    components.append(Plain(f"--- 渲染错误 ---\n{md_content}"))
-            else:
-                if part:
-                    components.append(Plain(part))
-
-        return components
+        output_path = os.path.join(self.IMAGE_CACHE_DIR, f"{uuid.uuid4()}.png")
+        try:
+            paths = await self._markdown_to_image_playwright(
+                md_text=content, output_image_path=output_path, scale=2, mode=user_mode,
+            )
+            if paths:
+                return [Image.fromFileSystem(path) for path in paths]
+        except Exception as exc:
+            logger.error("[mathsolve] 图片渲染失败: %s", type(exc).__name__)
+        return [Plain("图片渲染失败，请稍后重试。")]
 
     async def _markdown_to_image_playwright(
-            self,
-            md_text: str,
-            output_image_path: str,
-            scale: int = 2,
-            mode: str = "mobile",
+            self, md_text: str, output_image_path: str, scale: int = 2, mode: str = "mobile",
     ) -> List[str]:
         async with self._render_sema:
-            # 尽量复用 browser；若无法复用则本次临时启动
-            browser = self._browser
-            pw = self._pw
-
-            if bool(self._cfg("reuse_playwright_browser", True)) and browser is None:
-                await self._ensure_browser()
-                browser = self._browser
-                pw = self._pw
-
-            return await self._markdown_to_image_playwright_impl(
-                md_text=md_text,
-                output_image_path=output_image_path,
-                scale=scale,
-                mode=mode,
-                shared_browser=browser,
-                shared_pw=pw,
-            )
+            for attempt in range(2):
+                try:
+                    browser = None
+                    if attempt == 0 and bool(self._cfg("reuse_playwright_browser", True)):
+                        await self._ensure_browser()
+                        browser = self._browser
+                    paths = await self._markdown_to_image_playwright_impl(
+                        md_text=md_text, output_image_path=output_image_path, scale=scale, mode=mode,
+                        shared_browser=browser, shared_pw=self._pw if browser is not None else None,
+                    )
+                    if paths:
+                        return paths
+                    raise RuntimeError("Renderer returned no images")
+                except Exception as exc:
+                    if attempt:
+                        raise
+                    logger.warning("[mathsolve] 图片渲染重试，使用独立浏览器: %s", type(exc).__name__)
 
     async def _markdown_to_image_playwright_impl(
             self,

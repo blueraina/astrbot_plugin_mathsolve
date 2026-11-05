@@ -24,7 +24,7 @@ try:
     from .pdf_prompt_preferences import PdfPromptMixin, PdfPromptError, prompt_command, pdf_prompt_reply
     from .grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from .group_message_gate import GroupMessageGate, group_key
-    from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
+    from .image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, image_tool_reply, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
 except ImportError:
     from shared import *
     from memory import MemoryMixin
@@ -42,7 +42,7 @@ except ImportError:
     from pdf_prompt_preferences import PdfPromptMixin, PdfPromptError, prompt_command, pdf_prompt_reply
     from grading import GradingMixin, GradingError, grading_intent, grading_tool_reply
     from group_message_gate import GroupMessageGate, group_key
-    from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
+    from image_reply_policy import image_reply_decision, plain_reply_text, constrain_image_tool, image_tool_already_sent, image_tool_reply, track_active_followup, prepare_forward_reply_evidence, should_route_math, mark_semantic_math, routing_text
 
 
 # =============================================================================
@@ -154,12 +154,17 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
         os.makedirs(plugin.IMAGE_CACHE_DIR, exist_ok=True)
         out_path = os.path.join(plugin.IMAGE_CACHE_DIR, f"tool_{uuid.uuid4().hex}.png")
 
-        img_paths = await plugin._markdown_to_image_playwright(
-            md_text=md_text,
-            output_image_path=out_path,
-            scale=scale,
-            mode=mode,
-        )
+        try:
+            img_paths = await plugin._markdown_to_image_playwright(
+                md_text=md_text, output_image_path=out_path, scale=scale, mode=mode,
+            )
+            if not img_paths:
+                raise RuntimeError("Renderer returned no images")
+        except Exception as exc:
+            logger.error("[mathsolve] 图片工具渲染失败: %s", type(exc).__name__)
+            result = {"ok": False, "sent": 0, "mode": mode, "scale": scale, "error": "图片渲染失败，请稍后重试。"}
+            event.set_extra("mathsolve_image_tool_result", result)
+            return json.dumps(result, ensure_ascii=False)
 
         # 发送图片
         try:
@@ -185,10 +190,12 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
 
         if sent and event is not None:
             event.set_extra("mathsolve_image_tool_sent", True)
-        return json.dumps(
-            {"ok": bool(img_paths), "images": img_paths, "sent": sent, "mode": mode, "scale": scale},
-            ensure_ascii=False,
-        )
+        result = {"ok": bool(img_paths) and sent == len(img_paths), "images": img_paths,
+                  "sent": sent, "mode": mode, "scale": scale}
+        if not result["ok"]:
+            result["error"] = "部分图片发送失败，请稍后重试。" if sent else "图片发送失败，请稍后重试。"
+        event.set_extra("mathsolve_image_tool_result", result)
+        return json.dumps(result, ensure_ascii=False)
 
 @dataclass
 class Md2ImgSolveMathPdfTool(FunctionTool[AstrAgentContext]):
@@ -491,7 +498,7 @@ class MathsolvePdfPromptTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.9",
+    "1.18.10",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -601,7 +608,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.9 - PDF 个人提示词)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.10 - 图片答疑发送修复)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 
@@ -647,11 +654,16 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
 
     # ------------------------- 生命周期：尽量释放资源 -------------------------
     async def _ensure_browser(self):
-        if self._browser is not None:
+        if self._browser is not None and self._browser.is_connected():
             return
         async with self._pw_lock:
-            if self._browser is not None:
+            if self._browser is not None and self._browser.is_connected():
                 return
+            stale_pw = self._pw
+            self._browser = None
+            self._pw = None
+            if stale_pw is not None:
+                await cleanup(stale_pw.stop)
             pw = None
             try:
                 pw = await acquire(lambda: async_playwright().start(), lambda p: p.stop())
@@ -2572,6 +2584,11 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
     # ---------- LLM响应：full 强制 <md>；hint 预计算提示流 ----------
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
+        image_reply = image_tool_reply(event)
+        if image_reply is not None and not getattr(resp, "tools_call_name", None):
+            resp.result_chain = None
+            resp.completion_text = image_reply
+            return
         preference_reply = pdf_prompt_reply(event)
         if preference_reply is not None and not getattr(resp, "tools_call_name", None):
             resp.result_chain = None
@@ -2705,6 +2722,12 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
     # ---------------- 装饰结果：hint 逐条消息；否则 Markdown->图片 ----------------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
+        image_reply = image_tool_reply(event)
+        if image_reply is not None:
+            result = event.get_result()
+            if result is not None:
+                result.chain = [Plain(image_reply)]
+            return
         preference_reply = pdf_prompt_reply(event)
         if preference_reply is not None:
             result = event.get_result()

@@ -142,12 +142,12 @@ class MathImageRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result=json.loads(await plugin_main.Md2ImgRenderMarkdownTool().call(wrapper,markdown='# 紧性\n每个开覆盖都有有限子覆盖。'))
         self.assertGreater(result['sent'],0)
         self.assertTrue(event.get_extra('mathsolve_image_tool_sent'))
-    async def test_render_failure_preserves_the_answer_and_marks_failure(self):
+    async def test_render_failure_reports_error_without_sending_source(self):
         self.plugin._markdown_to_image_playwright=AsyncMock(return_value=[])
         components=await self.plugin._process_text_with_markdown('同构保留结构。',Event(text='解释同构'))
         self.assertIsInstance(components[0],Comp.Plain)
         self.assertIn('渲染失败',components[0].text)
-        self.assertIn('同构保留结构',components[0].text)
+        self.assertNotIn('同构保留结构',components[0].text)
     async def test_router_requires_real_json_booleans(self):
         self.plugin.config.update(use_router_model=True,router_provider_id='router-test')
         self.context.llm_generate=AsyncMock(return_value=LLMResponse(role='assistant',completion_text='{"is_math":"false","wants_full_solution":"true"}'))

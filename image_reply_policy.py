@@ -25,7 +25,8 @@ _TEXT_ONLY = re.compile(
     r'|(?:用|以)(?:纯)?(?:文字|文本)(?:来|重新|再)?(?:评分|批改|解释|解答|说明|回答|回复)'
     r'|\b(?:text[ -]only|no images?|do not (?:send|use) images?)\b', re.I)
 _IMAGE_REQUEST = re.compile(
-    r'(?:用|以)(?:一张)?(?:图片|截图|长图)(?:的)?(?:形式|方式|格式)?(?:回|答|发|呈现|展示)'
+    r'(?:用|以)(?:[\w\s]{0,12}的)?(?:一张)?(?:图片|截图|长图)(?:的)?(?:形式|方式|格式)?(?:回|答|发|呈现|展示)'
+    r'|(?:图片|截图|长图)(?:简洁|简短|简要|详细|完整|清晰|直观|直接|重新|继续|再|来|地|的|给我|为我|帮我|\s){0,4}(?:回答|回复|解答|作答|解释|讲解|呈现|展示)'
     r'|(?:生成|渲染|导出|转成|转为|做成|输出|发成)(?:为|成)?(?:一张|张)?(?:图片|长图|截图)'
     r'|(?:给我|帮我|请).{0,8}(?:发|生成|制作)(?:一张|张|个)?(?:图|图片|截图)'
     r'|(?:图片|长图|截图)(?:版|形式|格式)(?:的)?(?:回复|回答|发给我)'
@@ -46,10 +47,10 @@ _SOLVE_ACTION = re.compile(
     r'|(?:是否|是不是).{0,8}(?:成立|收敛|可导|连续|可积|正定|内积)'
     r'|\b(?:solve|prove|calculate|simplify|differentiate|integrate)\b', re.I)
 _PROBLEM_REQUEST = re.compile(
-    r'(?:这|那|上面|下面|上述|该|上一|这道|那道|这一道|第[一二三四五六七八九十\d]+)(?:个|道)?题.{0,12}'
-    r'(?:怎么|如何|求解|解答|解法|证明|推导|分析|讲解|思路|提示|检查|批改)'
-    r'|(?:解答|解一下|求解|做一下|讲解|讲一下|分析|检查|批改|解|做).{0,12}'
-    r'(?:这道题|这题|那道题|那题|题目|图(?:片)?中(?:的)?题|习题|练习题|数学题|试卷|证明|解答过程)'
+    r'(?:这|那|上面|下面|上述|该|上一|这道|那道|这一道|此|本|第[一二三四五六七八九十\d]+)(?:个|道)?题.{0,12}'
+    r'(?:怎么|如何|求解|解答|回答|解法|证明|推导|分析|讲解|思路|提示|检查|批改)'
+    r'|(?:回答|解答|解一下|求解|做一下|讲解|讲一下|分析|检查|批改|解|做).{0,12}'
+    r'(?:此题|该题|本题|这道题|这题|那道题|那题|题目|图(?:片)?中(?:的)?题|习题|练习题|数学题|试卷|证明|解答过程)'
     r'|(?:找|检索|挑选).{0,12}(?:数学题|习题|练习题)')
 _IMAGE_SOLVE = re.compile(r'^(?:请|麻烦|帮我|能不能|可以)?\s*(?:解答|解一下|做一下|求解|批改|验算|检查解答|给出解答)(?:一下|下|这张图|图片中题目|图中的题|这道|全部|这题|这道题|吧|吗|。|！|!|？|\?|\s)*$')
 _NO_SOLVE = re.compile(r'(?:不要|别|不用|无需|不需要).{0,6}(?:解题|解答|证明|求解|计算)')
@@ -343,6 +344,8 @@ def classify_image_reply(text, *, has_image=False, has_reply=False, math_context
     image_requested = bool(_IMAGE_REQUEST.search(intent)) and not text_only
     if re.search(r'^(?:请问)?(?:如何|怎么|为什么|为何).{0,24}(?:生成|渲染|转成|转为).{0,8}(?:图片|长图|截图)', intent):
         image_requested = False
+    if re.search(r'^(?:请问)?(?:如何|怎么)(?:用|以).{0,16}(?:图片|长图|截图)(?:回答|回复)[？?。!！]*$', intent):
+        image_requested = False
     math_request = bool(_PROBLEM_REQUEST.search(intent))
     math_request |= _general_math_request(intent)
     math_request |= bool(_MATH_TOPIC.search(intent) and _SOLVE_ACTION.search(intent))
@@ -461,7 +464,17 @@ def image_tool_already_sent(event):
 
 def constrain_image_tool(req, decision):
     """Filter a request-local copy. Never mutate the globally registered ToolSet."""
+    # A later captured follow-up can change the delivery format in this same run.
+    req.system_prompt = re.sub(r"\n\[本轮(?:优先图片回答|图片发送限制)\][^\n]*\n?", "\n",
+                               str(getattr(req, 'system_prompt', '') or ''))
     if decision.allowed:
+        removed = getattr(req, '_mathsolve_removed_image_tool', None)
+        toolset = getattr(req, 'func_tool', None)
+        if removed is not None and toolset is not None and getattr(removed, 'active', True):
+            if not any(getattr(t, 'name', '') == 'md2img_render_markdown' for t in toolset.tools):
+                restored = copy(toolset)
+                restored.tools = [*toolset.tools, removed]
+                req.func_tool = restored
         marker = '[本轮优先图片回答]'
         prompt = str(getattr(req, 'system_prompt', '') or '')
         if marker not in prompt:
@@ -474,6 +487,9 @@ def constrain_image_tool(req, decision):
         return
     toolset = getattr(req, 'func_tool', None)
     if toolset is not None and isinstance(getattr(toolset, 'tools', None), list):
+        for tool in toolset.tools:
+            if getattr(tool, 'name', '') == 'md2img_render_markdown':
+                req._mathsolve_removed_image_tool = tool
         filtered = copy(toolset)
         filtered.tools = [t for t in toolset.tools if getattr(t, 'name', '') != 'md2img_render_markdown']
         req.func_tool = filtered
@@ -485,3 +501,15 @@ def constrain_image_tool(req, decision):
              if decision.document_requested else '本轮使用普通文字回复，不调用 md2img_render_markdown，不输出 <md> 标签。') +
             '用户发来图片、引用图片，或正文含公式/表格/代码，不代表用户要求图片回复。'
             '保留正常回答内容；此限制不影响用户明确请求的 PDF 或其他工具。\n')
+
+
+def image_tool_reply(event):
+    """Use the real delivery outcome for the final acknowledgement."""
+    if event is None or any(event.get_extra(key) for key in (
+        'md2img_pdf_generation', 'mathsolve_md_generation', 'mathsolve_grading_generation',
+    )):
+        return None
+    result = event.get_extra('mathsolve_image_tool_result')
+    if not isinstance(result, dict):
+        return None
+    return '图片解答已发送。' if result.get('ok') else result.get('error', '图片暂时生成失败，请稍后重试。')
