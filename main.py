@@ -95,8 +95,8 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
     name: str = "md2img_render_markdown"
     description: str = (
         "将一段 Markdown(含 LaTeX/内联 SVG) 渲染成图片并发送到当前会话。"
-        "用户未指定格式时，答疑默认优先使用本工具，无须用户明确要求图片，也不局限于数学关键词。"
-        "简短寒暄或确认可用文字；明确要求纯文字、源码或 PDF/Markdown 文档时遵从指定格式。"
+        "数学答疑默认优先使用本工具，无须用户明确要求图片；用户明确要求图片时也可使用。"
+        "普通聊天、闲聊和游戏讨论使用文字，未指定格式不代表要求图片；明确要求纯文字、源码或 PDF/Markdown 文档时遵从指定格式。"
         "数学证明/解答必须在 Markdown 开头提供题目或证明目标卡片："
         "`> [problem-card]` 换行 `> **题目/证明目标：** ...`，随后再用 `## 一、证明过程` 等分节。"
     )
@@ -133,7 +133,7 @@ class Md2ImgRenderMarkdownTool(FunctionTool[AstrAgentContext]):
             logger.info("[mathsolve] 阻止未获本轮用户意图许可的图片工具调用")
             return json.dumps({
                 "ok": False, "sent": 0, "error_code": "image_reply_not_requested",
-                "error": "本轮为简短寒暄、内部处理或已指定文字/文档格式。不要再调用图片工具或添加 <md> 标签。",
+                "error": "本轮不是数学答疑或明确图片请求，或已指定文字/文档格式。请用文字回复，不再调用图片工具或添加 <md> 标签。",
                 "reply_as_text": plain_reply_text(md_text),
             }, ensure_ascii=False)
 
@@ -498,7 +498,7 @@ class MathsolvePdfPromptTool(FunctionTool[AstrAgentContext]):
     "astrbot_plugin_mathsolve",
     "blueraina",
     "Markdown转图片 + 数学图文解答 + /pdf LaTeX解答 + /spdf DeepThink多角色迭代 + 知识库检索 + 对话记忆",
-    "1.18.11",
+    "1.18.12",
 )
 class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, MarkdownOutputMixin, UsageReportMixin, DailyReportMixin, MemoryMixin, SpdfMixin, PdfMixin, RenderMixin, Star):
     def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
@@ -608,7 +608,7 @@ class MarkdownConverterPlugin(GradingMixin, PdfPromptMixin, PdfThemeMixin, Markd
             self._start_usage_report_scheduler()
             self._grading_start_indexer()
 
-            logger.info("AstrBot mathsolve 插件已就绪 (1.18.11 - 默认图片与 Markdown 兜底)")
+            logger.info("AstrBot mathsolve 插件已就绪 (1.18.12 - 闲聊文字与数学图片分流)")
         except Exception as e:
             logger.error(f"初始化失败: {e}")
 

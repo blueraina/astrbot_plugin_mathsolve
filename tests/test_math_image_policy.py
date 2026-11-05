@@ -34,7 +34,7 @@ class MathImagePolicyTests(unittest.TestCase):
                      'text only: What is compactness?', '用PDF解释一致连续',
                      '请用 Markdown 文档讲解矩阵', '/pdf 求积分', '/md 解释同构']:
             with self.subTest(text=text):self.assertFalse(classify_image_reply(text).allowed)
-    def test_general_answers_default_to_images_without_becoming_math_tasks(self):
+    def test_casual_chat_and_software_do_not_request_images(self):
         for text in ['你好', '今天吃什么', 'Python函数怎么定义', 'LaTeX里怎么输入矩阵',
                      'Markdown公式显示乱码怎么办', '怎么配置MathJax', '这张照片好看吗',
                      '数学课今天取消了', '你的理想是什么', '我们在哪里集合？', '连续下雨怎么办？',
@@ -44,8 +44,8 @@ class MathImagePolicyTests(unittest.TestCase):
                 decision=classify_image_reply(text)
                 self.assertFalse(decision.math_request)
                 self.assertFalse(decision.image_requested)
-                self.assertEqual(decision.allowed, text != '你好')
-        self.assertTrue(classify_image_reply('',has_image=True).allowed)
+                self.assertFalse(decision.allowed)
+        self.assertFalse(classify_image_reply('',has_image=True).allowed)
     def test_quote_math_followup_uses_only_this_reference(self):
         event=Event(text='能举个例子吗')
         event.message_obj.message=[Comp.Reply(id='exact',chain=[Comp.Plain('什么是紧性？')])]
@@ -55,7 +55,7 @@ class MathImagePolicyTests(unittest.TestCase):
             self.assertTrue(image_reply_decision(event).allowed)
         event.message_obj.message=[Comp.Reply(id='different',chain=[Comp.Plain('天气很好')])]
         self.assertFalse(image_reply_decision(event).math_request)
-        self.assertTrue(image_reply_decision(event).allowed)
+        self.assertFalse(image_reply_decision(event).allowed)
     def test_router_permission_is_bound_to_user_and_turn(self):
         event=Event(text='什么是étale态射？')
         self.assertTrue(should_route_math(event))
@@ -111,7 +111,7 @@ class MathImageRuntimeTests(unittest.IsolatedAsyncioTestCase):
         other=Event(text='明天吃什么？')
         self.plugin._router_classify=AsyncMock(return_value={'is_math':False})
         request=self.request();await self.plugin.on_llm_req(other,request)
-        self.assertEqual(len(request.func_tool.tools),1)
+        self.assertEqual(len(request.func_tool.tools),0)
         self.assertFalse(image_reply_decision(other).math_request)
     async def test_plain_or_document_format_never_uses_router_to_override_user(self):
         self.plugin._router_classify=AsyncMock(return_value={'is_math':True})

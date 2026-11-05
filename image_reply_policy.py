@@ -1,4 +1,4 @@
-"""Explicit formats win; ordinary answers prefer images with a final content fallback."""
+"""Math answers prefer images; ordinary chat stays text unless rich output needs rendering."""
 from copy import copy
 from dataclasses import dataclass
 import asyncio
@@ -12,11 +12,10 @@ class ImageReplyDecision:
     math_request: bool = False
     text_only: bool = False
     document_requested: bool = False
-    default_image: bool = False
 
     @property
     def allowed(self):
-        return not self.text_only and not self.document_requested and (self.image_requested or self.math_request or self.default_image)
+        return not self.text_only and not self.document_requested and (self.image_requested or self.math_request)
 
 
 _TEXT_ONLY = re.compile(
@@ -367,9 +366,8 @@ def classify_image_reply(text, *, has_image=False, has_reply=False, math_context
     document_intent = re.sub(r'(?:不要|不用|别|无需|不需要)\s*(?:用|发|生成|输出)?\s*'
                              r'(?:PDF|Markdown|\.?md)(?![a-zA-Z])', '', intent, flags=re.I)
     command = intent.startswith('/')
-    default_image = bool(intent or has_image or has_reply) and not command and not _SHORT_ACK.fullmatch(intent)
     return ImageReplyDecision(image_requested, math_request, text_only or command,
-                              bool(_DOCUMENT_REQUEST.search(document_intent)), default_image)
+                              bool(_DOCUMENT_REQUEST.search(document_intent)))
 
 
 def _event_decision(event, *, inherited_math=False):
@@ -392,7 +390,7 @@ def _event_decision(event, *, inherited_math=False):
                                     math_context=quote_math or (inherited_math and not has_reply))
     try:
         if event.get_extra('mathsolve_semantic_math') == _semantic_binding(event):
-            return ImageReplyDecision(decision.image_requested, True, decision.text_only, decision.document_requested, decision.default_image)
+            return ImageReplyDecision(decision.image_requested, True, decision.text_only, decision.document_requested)
     except (AttributeError, TypeError):
         pass
     return decision
@@ -494,7 +492,7 @@ def dense_markdown(text):
     bold = len(re.findall(r'\*\*[^\n*]+\*\*', text))
     formulas = len(re.findall(r'(?<!\$)\$(?!\$)[^\n$]+\$(?!\$)|\\\([^\n]+?\\\)', text))
     return (fenced or table or display_math or formulas >= 3 or
-            (len(text) >= 160 and headings + min(lists, 3) + min(bold, 3) >= 3))
+            (len(text) >= 400 and headings + min(lists, 4) + min(bold, 4) >= 6))
 
 
 def should_render_answer(event, text):
@@ -509,9 +507,9 @@ def should_render_answer(event, text):
         return False
     if dense_markdown(content):
         return True
-    if decision.image_requested or decision.math_request:
+    if decision.image_requested:
         return True
-    return decision.default_image and not _SHORT_ACK.fullmatch(content)
+    return decision.math_request and not _SHORT_ACK.fullmatch(content)
 
 
 def constrain_image_tool(req, decision):
@@ -531,8 +529,9 @@ def constrain_image_tool(req, decision):
         prompt = str(getattr(req, 'system_prompt', '') or '')
         if marker not in prompt:
             req.system_prompt = prompt + '\n' + marker + (
-                '用户未指定输出格式时，答疑默认优先用图片回答，无须用户说“图片”，不局限于已识别的数学关键词。'
-                '仅简短寒暄或确认可直接文字回复；明确要求纯文字、MD 或 PDF 时遵从用户指定格式。'
+                '数学答疑未指定格式时优先用图片回答，无须用户说“图片”；用户明确要求图片时也使用图片。'
+                '普通聊天、闲聊、游戏讨论默认文字，不能仅因用户没指定格式就转图。'
+                '明确要求纯文字、MD 或 PDF 时遵从用户指定格式。'
                 '先完成必要的检索和推理，再把本轮完整回答交给 md2img_render_markdown 渲染发送。'
                 '传入普通 Markdown，不带 <md> 标签。只要提示时只给提示，不能擅自变成完整解答。'
                 '工具已成功发送图片后只简短确认，不重复发送大段 Markdown 或重复调用图片工具。'
